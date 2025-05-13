@@ -2,7 +2,7 @@ services:
   - type: web
     name: image-caching-server
     runtime: elixir
-    region: oregon
+    region: frankfurt
     plan: starter
     branch: main
     env: prod
