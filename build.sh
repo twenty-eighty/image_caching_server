@@ -14,8 +14,4 @@ mix deps.get --only prod
 mix deps.compile --all
 mix compile
 
-echo "Setting up cache directory..."
-mkdir -p ${CACHE_DIR}
-chmod 777 ${CACHE_DIR}
-
-echo "Build completed successfully!" 
+echo "Build completed successfully!"
