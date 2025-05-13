@@ -2,11 +2,7 @@ services:
   - type: web
     name: image-caching-server
     env: elixir
-    buildCommand: |
-      mix local.hex --force
-      mix local.rebar --force
-      mix deps.get --only prod
-      mix compile
+    buildCommand: ./build.sh
     startCommand: mix phx.server
     envVars:
       - key: MIX_ENV
