@@ -40,6 +40,7 @@ image_caching_server-*.tar
 # Environment files
 .env*
 !.env.example
+!render.yaml
 
 # IDE and editor files
 .idea/

@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: image-caching-server
+    env: elixir
+    buildCommand: |
+      mix local.hex --force
+      mix local.rebar --force
+      mix deps.get --only prod
+      mix compile
+      mix phx.digest
+    startCommand: mix phx.server
+    envVars:
+      - key: MIX_ENV
+        value: prod
+      - key: PORT
+        value: 80
+      - key: CACHE_DIR
+        value: /var/cache/images
+      - key: MAX_CACHE_SIZE_MB
+        value: 1024
+      - key: ALLOWED_DOMAINS
+        sync: false  # Indicates this should be set in Render dashboard
+      - key: SECRET_KEY_BASE
+        generateValue: true  # Automatically generates a secure secret
+      - key: PHX_HOST
+        sync: false  # Set this in Render dashboard to your app's domain
+    disk:
+      name: cache
+      mountPath: /var/cache/images
+      sizeGB: 10 
