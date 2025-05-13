@@ -398,4 +398,15 @@ defmodule ImageCachingServer.ImageCache do
         {:error, inspect(e)}
     end
   end
+
+  # Handle normal port exits from ImageMagick operations
+  def handle_info({:EXIT, port, :normal}, state) when is_port(port) do
+    {:noreply, state}
+  end
+
+  # Catch-all handler for unexpected messages
+  def handle_info(msg, state) do
+    Logger.warning("Received unexpected message: #{inspect(msg)}")
+    {:noreply, state}
+  end
 end
