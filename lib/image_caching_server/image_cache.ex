@@ -205,7 +205,10 @@ defmodule ImageCachingServer.ImageCache do
 
   defp download_image(url, temp_path, hash) do
     Logger.info("Downloading image from #{url}")
-    case HTTPoison.get(url, [], [follow_redirect: true]) do
+    # Ensure URL is properly encoded
+    encoded_url = url |> URI.parse() |> URI.to_string()
+
+    case HTTPoison.get(encoded_url, [], [follow_redirect: true]) do
       {:ok, %{status_code: 200, body: image_data}} ->
         ensure_cache_size(byte_size(image_data))
 
