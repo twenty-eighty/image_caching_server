@@ -20,16 +20,7 @@ config :image_caching_server, ImageCachingServerWeb.Endpoint,
   pubsub_server: ImageCachingServer.PubSub,
   live_view: [signing_salt: "your-salt-here"]
 
-# Configure your application
-config :image_caching_server,
-  ecto_repos: [ImageCachingServer.Repo]
 
-# Configure the Ecto repository
-config :image_caching_server, ImageCachingServer.Repo,
-  database: "image_caching_server_repo",
-  username: "postgres",
-  password: "postgres",
-  hostname: "localhost"
 
 # Configures the mailer
 #
