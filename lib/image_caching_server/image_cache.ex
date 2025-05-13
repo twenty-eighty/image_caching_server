@@ -200,53 +200,105 @@ defmodule ImageCachingServer.ImageCache do
 
   defp download_image(url, temp_path, hash) do
     Logger.info("Downloading image from #{url}")
-    # Ensure URL is properly encoded
-    encoded_url = url |> URI.parse() |> URI.to_string()
 
-    case HTTPoison.get(encoded_url, [], [follow_redirect: true]) do
-      {:ok, %{status_code: 200, body: image_data}} ->
-        ensure_cache_size(byte_size(image_data))
+    # Validate and parse URL
+    case validate_url(url) do
+      {:ok, valid_url} ->
+        Logger.debug("Using validated URL: #{valid_url}")
 
-        # First save to temporary file
-        case File.write(temp_path, image_data) do
-          :ok ->
-            # Get the original format and save with correct extension
-            case get_image_format(temp_path) do
-              {:ok, format} ->
-                final_path = Path.join(@cache_dir, "#{hash}.#{format}")
-                case File.rename(temp_path, final_path) do
-                  :ok ->
-                    # Track file size
-                    {:ok, %{size: size}} = File.stat(final_path)
-                    ConCache.put(:size_cache, "size_#{Path.basename(final_path)}", size)
-                    current_size = ConCache.get(:size_cache, :total_size) || 0
-                    ConCache.put(:size_cache, :total_size, current_size + size)
+        # Add default headers to help with some servers that might reject requests
+        headers = [
+          {"User-Agent", "Mozilla/5.0"},
+          {"Accept", "image/*"}
+        ]
 
-                    Logger.info("Successfully downloaded and cached image at #{final_path} (#{size / 1024 / 1024}MB)")
-                    {:ok, final_path}
+        case HTTPoison.get(valid_url, headers, [follow_redirect: true, ssl: [{:versions, [:'tlsv1.2']}]]) do
+          {:ok, %{status_code: 200, body: image_data}} ->
+            ensure_cache_size(byte_size(image_data))
+
+            # First save to temporary file
+            case File.write(temp_path, image_data) do
+              :ok ->
+                # Get the original format and save with correct extension
+                case get_image_format(temp_path) do
+                  {:ok, format} ->
+                    final_path = Path.join(@cache_dir, "#{hash}.#{format}")
+                    case File.rename(temp_path, final_path) do
+                      :ok ->
+                        # Track file size
+                        {:ok, %{size: size}} = File.stat(final_path)
+                        ConCache.put(:size_cache, "size_#{Path.basename(final_path)}", size)
+                        current_size = ConCache.get(:size_cache, :total_size) || 0
+                        ConCache.put(:size_cache, :total_size, current_size + size)
+
+                        Logger.info("Successfully downloaded and cached image at #{final_path} (#{size / 1024 / 1024}MB)")
+                        {:ok, final_path}
+                      {:error, reason} ->
+                        File.rm(temp_path)
+                        Logger.error("Failed to rename temporary file: #{inspect(reason)}")
+                        {:error, "Failed to rename temporary file: #{inspect(reason)}"}
+                    end
                   {:error, reason} ->
                     File.rm(temp_path)
-                    Logger.error("Failed to rename temporary file: #{inspect(reason)}")
-                    {:error, "Failed to rename temporary file: #{inspect(reason)}"}
+                    Logger.error("Failed to determine image format: #{inspect(reason)}")
+                    {:error, "Failed to determine image format: #{inspect(reason)}"}
                 end
               {:error, reason} ->
-                File.rm(temp_path)
-                Logger.error("Failed to determine image format: #{inspect(reason)}")
-                {:error, "Failed to determine image format: #{inspect(reason)}"}
+                Logger.error("Failed to save temporary image: #{inspect(reason)}")
+                {:error, "Failed to save temporary image: #{inspect(reason)}"}
             end
-          {:error, reason} ->
-            Logger.error("Failed to save temporary image: #{inspect(reason)}")
-            {:error, "Failed to save temporary image: #{inspect(reason)}"}
+
+          {:ok, %{status_code: status_code}} ->
+            Logger.error("Failed to download image, status code: #{status_code}")
+            {:error, "Failed to download image, status code: #{status_code}"}
+
+          {:error, %{reason: reason}} ->
+            Logger.error("Failed to download image: #{inspect(reason)}")
+            {:error, "Failed to download image: #{inspect(reason)}"}
         end
 
-      {:ok, %{status_code: status_code}} ->
-        Logger.error("Failed to download image, status code: #{status_code}")
-        {:error, "Failed to download image, status code: #{status_code}"}
-
-      {:error, %{reason: reason}} ->
-        Logger.error("Failed to download image: #{inspect(reason)}")
-        {:error, "Failed to download image: #{inspect(reason)}"}
+      {:error, reason} ->
+        Logger.error("Invalid URL #{url}: #{reason}")
+        {:error, "Invalid URL: #{reason}"}
     end
+  end
+
+  defp validate_url(url) when is_binary(url) and byte_size(url) > 0 do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host}
+      when scheme in ["http", "https"] and is_binary(host) and byte_size(host) > 0 ->
+        # Ensure the URL is properly encoded
+        encoded_url = url
+        |> String.replace(" ", "%20")
+        |> URI.parse()
+        |> URI.to_string()
+
+        {:ok, encoded_url}
+
+      %URI{scheme: nil} ->
+        {:error, "Missing URL scheme (http/https)"}
+
+      %URI{host: nil} ->
+        {:error, "Missing host in URL"}
+
+      %URI{scheme: scheme} when scheme not in ["http", "https"] ->
+        {:error, "Invalid URL scheme: #{scheme}"}
+
+      _ ->
+        {:error, "Invalid URL format"}
+    end
+  end
+
+  defp validate_url("") do
+    {:error, "Empty URL"}
+  end
+
+  defp validate_url(nil) do
+    {:error, "No URL provided"}
+  end
+
+  defp validate_url(_) do
+    {:error, "Invalid URL type"}
   end
 
   defp get_image_format(path) do
