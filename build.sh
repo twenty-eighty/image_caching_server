@@ -5,10 +5,6 @@ echo "Setting up environment..."
 export MIX_ENV=prod
 export ERL_AFLAGS="-kernel shell_history enabled"
 
-echo "Installing system dependencies..."
-apt-get update -y
-apt-get install -y imagemagick file
-
 echo "Installing Elixir tools..."
 mix local.hex --force
 mix local.rebar --force

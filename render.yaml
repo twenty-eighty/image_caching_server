@@ -5,6 +5,7 @@ services:
     region: frankfurt
     plan: starter
     branch: main
+    repo: https://github.com/twenty-eighty/image_caching_server
     env: prod
     buildCommand: "./build.sh"
     startCommand: "mix phx.server"
@@ -27,4 +28,16 @@ services:
     disk:
       name: cache
       mountPath: /var/cache/images
-      sizeGB: 10 
+      sizeGB: 10
+    # Ensure ImageMagick is available
+    buildFilter:
+      paths:
+        - build.sh
+        - mix.exs
+        - mix.lock
+        - lib/**/*
+        - config/**/*
+    scaling:
+      minInstances: 1
+      maxInstances: 1
+    healthCheckPath: / 
