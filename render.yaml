@@ -18,7 +18,7 @@ services:
       - key: CACHE_DIR
         value: /var/cache/images
       - key: MAX_CACHE_SIZE_MB
-        value: 1024
+        value: 4096
       - key: ALLOWED_DOMAINS
         sync: false
       - key: SECRET_KEY_BASE
