@@ -1,9 +1,14 @@
 services:
   - type: web
     name: image-caching-server
-    env: elixir
-    buildCommand: ./build.sh
-    startCommand: mix phx.server
+    runtime: elixir
+    region: oregon
+    plan: starter
+    branch: main
+    env: prod
+    buildCommand: "./build.sh"
+    startCommand: "mix phx.server"
+    autoDeploy: true
     envVars:
       - key: MIX_ENV
         value: prod
@@ -14,11 +19,11 @@ services:
       - key: MAX_CACHE_SIZE_MB
         value: 1024
       - key: ALLOWED_DOMAINS
-        sync: false  # Indicates this should be set in Render dashboard
+        sync: false
       - key: SECRET_KEY_BASE
-        generateValue: true  # Automatically generates a secure secret
+        generateValue: true
       - key: PHX_HOST
-        sync: false  # Set this in Render dashboard to your app's domain
+        sync: false
     disk:
       name: cache
       mountPath: /var/cache/images
