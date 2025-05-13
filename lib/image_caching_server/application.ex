@@ -10,10 +10,10 @@ defmodule ImageCachingServer.Application do
     children = [
       # Start the PubSub system
       {Phoenix.PubSub, name: ImageCachingServer.PubSub},
+      # Start the Cache Supervisor
+      ImageCachingServer.CacheSupervisor,
       # Start the Endpoint (http/https)
-      ImageCachingServerWeb.Endpoint,
-      # Start the Image Cache
-      ImageCachingServer.ImageCache
+      ImageCachingServerWeb.Endpoint
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

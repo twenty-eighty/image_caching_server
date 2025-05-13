@@ -1,9 +1,8 @@
 defmodule ImageCachingServer.ImageCache do
-  use GenServer
+  use GenServer, restart: :permanent
   require Logger
 
   @cache_dir System.get_env("CACHE_DIR", "priv/cache")
-  @cache_name :image_cache
   @max_cache_size String.to_integer(System.get_env("MAX_CACHE_SIZE_MB", "1024")) * 1024 * 1024
   @eviction_threshold @max_cache_size * 0.9
   # Increase timeout to 30 seconds for large image processing
@@ -14,24 +13,15 @@ defmodule ImageCachingServer.ImageCache do
   end
 
   def init(_) do
+    Process.flag(:trap_exit, true)
+    init_cache()
+  end
+
+  defp init_cache do
     # Ensure cache directory exists
     File.mkdir_p!(@cache_dir)
     Logger.info("Cache directory initialized at #{@cache_dir}")
     Logger.info("Max cache size: #{@max_cache_size / 1024 / 1024}MB, Eviction threshold: #{@eviction_threshold / 1024 / 1024}MB")
-
-    # Start ConCache with TTL of 1 hour
-    {:ok, _pid} = ConCache.start_link(
-      name: @cache_name,
-      ttl_check_interval: :timer.minutes(1),
-      global_ttl: :timer.hours(1),
-      touch_on_read: true
-    )
-
-    # Start size tracking cache (no TTL)
-    {:ok, _pid} = ConCache.start_link(
-      name: :size_cache,
-      ttl_check_interval: false
-    )
 
     # Initialize total size counter
     ConCache.put(:size_cache, :total_size, 0)
@@ -40,6 +30,11 @@ defmodule ImageCachingServer.ImageCache do
     rebuild_cache_state()
 
     {:ok, %{}}
+  end
+
+  def terminate(reason, _state) do
+    Logger.warning("ImageCache terminating, reason: #{inspect(reason)}")
+    :ok
   end
 
   defp rebuild_cache_state do
