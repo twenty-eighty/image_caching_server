@@ -46,7 +46,7 @@ The following environment variables can be used to configure the server:
 - `PORT`: Server port (default: 4000)
 - `CACHE_DIR`: Directory for cached images (default: "priv/cache")
 - `MAX_CACHE_SIZE_MB`: Maximum cache size in megabytes (default: 1024)
-- `ALLOWED_DOMAINS`: Comma-separated list of domains allowed to be source of images
+- `ALLOWED_DOMAINS`: Comma-separated list of domains allowed to be source of requests
 - `SECRET_KEY_BASE`: Phoenix secret key base
 - `PHX_HOST`: Host name for production deployment
 
