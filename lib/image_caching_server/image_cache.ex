@@ -24,9 +24,6 @@ defmodule ImageCachingServer.ImageCache do
     Logger.info("Cache directory initialized at #{@cache_dir}")
     Logger.info("Max cache size: #{@max_cache_size / 1024 / 1024}MB, Eviction threshold: #{@eviction_threshold / 1024 / 1024}MB")
 
-    # Clear any files with MD5 hashes
-    clear_md5_files()
-
     # Initialize total size counter
     ConCache.put(:size_cache, :total_size, 0)
 
@@ -36,35 +33,6 @@ defmodule ImageCachingServer.ImageCache do
     {:ok, %{}}
   end
 
-  defp clear_md5_files do
-    case File.ls(@cache_dir) do
-      {:ok, files} ->
-        md5_files = files
-          |> Enum.filter(fn file ->
-            # Extract hash portion from filename
-            hash = case String.split(file, ".") do
-              [hash, _ext] -> hash
-              ["scaled_" <> rest, _ext] -> String.split(rest, ".") |> hd()
-              _ -> nil
-            end
-            # Check if it's an MD5 hash
-            hash && HashUtils.is_md5_hash?(hash)
-          end)
-
-        if length(md5_files) > 0 do
-          Logger.warning("Found #{length(md5_files)} files with MD5 hashes, clearing them")
-
-          Enum.each(md5_files, fn file ->
-            path = Path.join(@cache_dir, file)
-            File.rm(path)
-            Logger.info("Removed MD5-hashed file: #{file}")
-          end)
-        end
-
-      {:error, reason} ->
-        Logger.error("Failed to read cache directory while clearing MD5 files: #{inspect(reason)}")
-    end
-  end
 
   def terminate(reason, _state) do
     Logger.warning("ImageCache terminating, reason: #{inspect(reason)}")

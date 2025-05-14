@@ -35,9 +35,19 @@ defmodule ImageCachingServerWeb.ImageController do
       {:error, :file_read_error, reason} ->
         error_message = "Failed to read scaled image: #{inspect(reason)}"
         send_error_response(conn, :internal_server_error, error_message, timing)
-      {:error, reason} ->
-        error_message = "#{inspect(reason)}"
-        send_error_response(conn, :bad_request, error_message, timing)
+      {:error, reason} when is_binary(reason) ->
+        if String.contains?(reason, "Failed to download image") do
+          # Log the failure and redirect to original URL
+          log_timing("Redirecting to original URL due to download failure", timing)
+          conn
+          |> put_status(302)
+          |> put_resp_header("location", url)
+          |> put_resp_header("cache-control", "no-store")
+          |> send_resp(302, "")
+        else
+          error_message = "#{inspect(reason)}"
+          send_error_response(conn, :bad_request, error_message, timing)
+        end
     end
   end
 
@@ -86,8 +96,9 @@ defmodule ImageCachingServerWeb.ImageController do
   defp send_success_response(%Plug.Conn{} = conn, image_data, timing) do
     log_timing("Request completed", timing)
 
-    # Get the path from the timing map
-    path = timing.path
+    # Get the path from the timing map and generate ETag
+    # We know path is always present in the success case
+    etag = HashUtils.etag_from_path(timing.path) || HashUtils.generate_etag(image_data)
 
     # Set aggressive caching headers since our images are content-addressed
     # Cache for 1 year (31536000 seconds)
@@ -95,7 +106,7 @@ defmodule ImageCachingServerWeb.ImageController do
     |> put_resp_content_type(get_content_type(image_data))
     |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
     |> put_resp_header("expires", format_expires_header(31536000))
-    |> put_resp_header("etag", HashUtils.etag_from_path(path) || HashUtils.generate_etag(image_data))
+    |> put_resp_header("etag", etag)
     |> send_resp(200, image_data)
   end
 
@@ -107,7 +118,7 @@ defmodule ImageCachingServerWeb.ImageController do
   end
 
   @spec send_error_response(Plug.Conn.t(), atom(), String.t(), request_timing()) :: Plug.Conn.t()
-  defp send_error_response(%Plug.Conn{} = conn, status, message, timing) when is_binary(message) do
+  defp send_error_response(%Plug.Conn{} = conn, status, message, timing) do
     log_timing("Request failed: #{message}", timing)
 
     conn
