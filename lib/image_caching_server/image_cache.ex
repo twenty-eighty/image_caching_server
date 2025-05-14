@@ -304,11 +304,14 @@ defmodule ImageCachingServer.ImageCache do
 
   @spec validate_url(String.t()) :: {:ok, String.t()} | {:error, String.t()}
   defp validate_url(url) when is_binary(url) and byte_size(url) > 0 do
-    case URI.parse(url) do
+    # Trim any whitespace from the URL first
+    trimmed_url = String.trim(url)
+
+    case URI.parse(trimmed_url) do
       %URI{scheme: scheme, host: host}
       when scheme in ["http", "https"] and is_binary(host) and byte_size(host) > 0 ->
         # Ensure the URL is properly encoded
-        encoded_url = url
+        encoded_url = trimmed_url
         |> String.replace(" ", "%20")
         |> URI.parse()
         |> URI.to_string()
