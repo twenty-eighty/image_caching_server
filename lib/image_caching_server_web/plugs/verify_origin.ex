@@ -12,7 +12,7 @@ defmodule ImageCachingServerWeb.Plugs.VerifyOrigin do
   def call(conn, _opts) do
     allowed_domains = Application.get_env(:image_caching_server, :allowed_domains, [])
 
-    with {:ok, domain, headers} <- extract_domain(conn),
+    with {:ok, domain, _headers} <- extract_domain(conn),
          true <- domain_allowed?(domain, allowed_domains) do
       conn
     else

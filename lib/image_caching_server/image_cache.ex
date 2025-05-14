@@ -170,6 +170,28 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
+  @doc """
+  Transforms URLs for various CDN providers to their direct access URLs.
+  This helps bypass redirects and handle special CDN requirements.
+
+  Currently handles:
+  - nostr.build: Converts cdn.nostr.build to pfp.nostr.build and adjusts paths.
+    This is needed because cdn.nostr.build uses Cloudflare and requires specific
+    HTTP/2 pseudo-headers and browser-like headers to return a 301 redirect.
+    Going directly to pfp.nostr.build bypasses these requirements.
+  """
+  def transform_cdn_url(url) when is_binary(url) do
+    uri = URI.parse(url)
+
+    cond do
+      String.contains?(uri.host || "", "cdn.nostr.build") ->
+        path = String.replace_prefix(uri.path, "/i/p/", "/")
+        "https://pfp.nostr.build#{path}"
+      true ->
+        url
+    end
+  end
+
   defp get_or_download_image(url) do
     hash = HashUtils.hash_string(url)
     # We'll determine the extension after downloading for new files
@@ -208,14 +230,25 @@ defmodule ImageCachingServer.ImageCache do
       {:ok, valid_url} ->
         Logger.debug("Using validated URL: #{valid_url}")
 
-        # Add default headers to help with some servers that might reject requests
+        # Handle nostr.build CDN redirect manually
+        final_url = transform_cdn_url(valid_url)
         headers = [
-          {"User-Agent", "Mozilla/5.0"},
-          {"Accept", "image/*"}
+          {"Host", URI.parse(final_url).host},
+          {"User-Agent", "curl/8.5.0"},
+          {"Accept", "*/*"}
         ]
 
-        case HTTPoison.get(valid_url, headers, [follow_redirect: true, ssl: [{:versions, [:'tlsv1.2']}]]) do
-          {:ok, %{status_code: 200, body: image_data}} ->
+        case HTTPoison.get(final_url, headers, [
+          follow_redirect: true,
+          ssl: [{:versions, [:'tlsv1.3']}],
+          hackney: [
+            cookie: [],
+            follow_redirect: true,
+            use_default_pool: false
+          ],
+          recv_timeout: 30_000
+        ]) do
+          {:ok, %{status_code: status_code, body: image_data}} ->
             ensure_cache_size(byte_size(image_data))
 
             # First save to temporary file
@@ -250,8 +283,8 @@ defmodule ImageCachingServer.ImageCache do
                 {:error, "Failed to save temporary image: #{inspect(reason)}"}
             end
 
-          {:ok, %{status_code: status_code}} ->
-            Logger.error("Failed to download image, status code: #{status_code}")
+          {:ok, %{status_code: status_code, headers: resp_headers}} ->
+            Logger.error("Failed to download image, status code: #{status_code}, headers: #{inspect(resp_headers)}")
             {:error, "Failed to download image, status code: #{status_code}"}
 
           {:error, %{reason: reason}} ->
