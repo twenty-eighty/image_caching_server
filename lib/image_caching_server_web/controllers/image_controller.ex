@@ -10,32 +10,37 @@ defmodule ImageCachingServerWeb.ImageController do
   Handles image scaling requests.
   """
   def scale(conn = %Plug.Conn{}, %{"url" => url, "width" => width}) do
-    timing = %{start_time: System.monotonic_time(), url: url}
+    timing = %{
+      start_time: System.monotonic_time(),
+      url: url,
+      width: 0  # Default width, will be updated after validation
+    }
 
     with {:ok, width_int} <- validate_width(width),
-         timing = Map.put(timing, :width, width_int),
+         timing = %{timing | width: width_int},
          {:ok, image_path} <- get_cached_image(url, width_int, timing),
          {:ok, image_data} <- read_image_file(image_path, timing) do
       send_success_response(conn, image_data, timing)
     else
       {:error, :invalid_width} ->
-        # Ensure timing has all required fields before passing
-        complete_timing = Map.put_new(timing, :width, 0)
-        send_error_response(conn, :bad_request, "Invalid width parameter", complete_timing)
+        send_error_response(conn, :bad_request, "Invalid width parameter", timing)
       {:error, :file_read_error, reason} ->
-        # Ensure error message is a proper string
-        error_message = "Failed to read scaled image: " <> to_string(reason)
+        error_message = "Failed to read scaled image: #{inspect(reason)}"
         send_error_response(conn, :internal_server_error, error_message, timing)
       {:error, reason} ->
-        # Ensure error message is a proper string
-        error_message = to_string(reason)
+        error_message = "#{inspect(reason)}"
         send_error_response(conn, :bad_request, error_message, timing)
     end
   end
 
   def scale(conn = %Plug.Conn{}, _params) do
-    # No timing data needed for this error case
-    send_error_response(conn, :bad_request, "Missing required parameters: url and width")
+    # Create a minimal timing map for consistency
+    timing = %{
+      start_time: System.monotonic_time(),
+      url: "",
+      width: 0
+    }
+    send_error_response(conn, :bad_request, "Missing required parameters: url and width", timing)
   end
 
   # Private helper functions
@@ -63,8 +68,7 @@ defmodule ImageCachingServerWeb.ImageController do
       {:ok, data} ->
         {:ok, data}
       {:error, reason} ->
-        # Ensure error message is a proper string by using string interpolation
-        error_str = to_string(reason)
+        error_str = "#{inspect(reason)}"
         {:error, :file_read_error, error_str}
     end
   end
@@ -78,14 +82,10 @@ defmodule ImageCachingServerWeb.ImageController do
     |> send_resp(200, image_data)
   end
 
-  @spec send_error_response(Plug.Conn.t(), atom(), String.t()) :: Plug.Conn.t()
-  defp send_error_response(conn, status, message) do
-    send_error_response(conn, status, message, nil)
-  end
 
-  @spec send_error_response(Plug.Conn.t(), atom(), String.t(), request_timing() | nil) :: Plug.Conn.t()
+  @spec send_error_response(Plug.Conn.t(), atom(), String.t(), request_timing()) :: Plug.Conn.t()
   defp send_error_response(%Plug.Conn{} = conn, status, message, timing) when is_binary(message) do
-    if timing, do: log_timing("Request failed: #{message}", timing)
+    log_timing("Request failed: #{message}", timing)
 
     conn
     |> put_status(status)
@@ -93,15 +93,14 @@ defmodule ImageCachingServerWeb.ImageController do
   end
 
   @spec log_timing(String.t(), request_timing()) :: :ok
-  defp log_timing(prefix, %{start_time: start_time, url: url} = timing) do
+  defp log_timing(prefix, %{start_time: start_time, url: url, width: width} = _timing) do
     processing_time = System.convert_time_unit(
       System.monotonic_time() - start_time,
       :native,
       :millisecond
     )
 
-    width_info = if Map.has_key?(timing, :width), do: " width=#{timing.width}", else: ""
-    Logger.info("#{prefix}: url=#{url}#{width_info} time=#{processing_time}ms")
+    Logger.info("#{prefix}: url=#{url} width=#{width} time=#{processing_time}ms")
   end
 
   @spec get_content_type(binary()) :: String.t()

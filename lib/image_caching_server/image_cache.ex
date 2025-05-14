@@ -263,6 +263,7 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
+  @spec validate_url(String.t()) :: {:ok, String.t()} | {:error, String.t()}
   defp validate_url(url) when is_binary(url) and byte_size(url) > 0 do
     case URI.parse(url) do
       %URI{scheme: scheme, host: host}
@@ -293,22 +294,18 @@ defmodule ImageCachingServer.ImageCache do
     {:error, "Empty URL"}
   end
 
-  defp validate_url(nil) do
-    {:error, "No URL provided"}
-  end
-
   defp validate_url(_) do
     {:error, "Invalid URL type"}
   end
 
   defp get_image_format(path) do
     try do
-      # First try with Mogrify
-      case Mogrify.open(path) do
+      # First try with Mogrify identify
+      case Mogrify.identify(path) do
         %{format: format} when is_binary(format) and format != "" ->
           {:ok, String.downcase(format)}
         _ ->
-          # Fallback to using file command
+          # Fallback to using file command if format is nil or empty
           case System.cmd("file", ["--mime-type", "-b", path]) do
             {mime, 0} ->
               format = case String.trim(mime) do
