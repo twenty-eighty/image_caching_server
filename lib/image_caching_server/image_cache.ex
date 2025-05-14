@@ -244,11 +244,12 @@ defmodule ImageCachingServer.ImageCache do
 
         case HTTPoison.get(final_url, headers, [
           follow_redirect: true,
-          ssl: [{:versions, [:'tlsv1.3']}],
           hackney: [
             cookie: [],
             follow_redirect: true,
-            use_default_pool: false
+            ssl_options: [
+              {:verify, :verify_none}
+            ]
           ],
           recv_timeout: 30_000
         ]) do
