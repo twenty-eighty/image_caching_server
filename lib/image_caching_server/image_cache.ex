@@ -179,6 +179,7 @@ defmodule ImageCachingServer.ImageCache do
     This is needed because cdn.nostr.build uses Cloudflare and requires specific
     HTTP/2 pseudo-headers and browser-like headers to return a 301 redirect.
     Going directly to pfp.nostr.build bypasses these requirements.
+  - nostr.build main domain: Converts nostr.build/i/ URLs to image.nostr.build
   """
   def transform_cdn_url(url) when is_binary(url) do
     uri = URI.parse(url)
@@ -187,6 +188,9 @@ defmodule ImageCachingServer.ImageCache do
       String.contains?(uri.host || "", "cdn.nostr.build") ->
         path = String.replace_prefix(uri.path, "/i/p/", "/")
         "https://pfp.nostr.build#{path}"
+      uri.host == "nostr.build" and String.starts_with?(uri.path || "", "/i/") ->
+        path = String.replace_prefix(uri.path, "/i/", "/")
+        "https://image.nostr.build#{path}"
       true ->
         url
     end
