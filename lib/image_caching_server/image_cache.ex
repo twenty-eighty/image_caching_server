@@ -248,7 +248,7 @@ defmodule ImageCachingServer.ImageCache do
           ],
           recv_timeout: 30_000
         ]) do
-          {:ok, %{status_code: status_code, body: image_data}} ->
+          {:ok, %{status_code: _status_code, body: image_data}} ->
             ensure_cache_size(byte_size(image_data))
 
             # First save to temporary file
