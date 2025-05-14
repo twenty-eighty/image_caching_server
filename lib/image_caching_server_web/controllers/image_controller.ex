@@ -1,10 +1,16 @@
 defmodule ImageCachingServerWeb.ImageController do
   use ImageCachingServerWeb, :controller
   require Logger
+  alias ImageCachingServer.HashUtils
 
   plug ImageCachingServerWeb.Plugs.VerifyOrigin
 
-  @type request_timing :: %{start_time: integer(), url: String.t(), width: integer()}
+  @type request_timing :: %{
+    start_time: integer(),
+    url: String.t(),
+    width: integer(),
+    path: String.t() | nil
+  }
 
   @doc """
   Handles image scaling requests.
@@ -13,12 +19,14 @@ defmodule ImageCachingServerWeb.ImageController do
     timing = %{
       start_time: System.monotonic_time(),
       url: url,
-      width: 0  # Default width, will be updated after validation
+      width: 0,  # Default width, will be updated after validation
+      path: nil  # Will be set when we get the image path
     }
 
     with {:ok, width_int} <- validate_width(width),
          timing = %{timing | width: width_int},
          {:ok, image_path} <- get_cached_image(url, width_int, timing),
+         timing = %{timing | path: image_path},
          {:ok, image_data} <- read_image_file(image_path, timing) do
       send_success_response(conn, image_data, timing)
     else
@@ -38,7 +46,8 @@ defmodule ImageCachingServerWeb.ImageController do
     timing = %{
       start_time: System.monotonic_time(),
       url: "",
-      width: 0
+      width: 0,
+      path: nil
     }
     send_error_response(conn, :bad_request, "Missing required parameters: url and width", timing)
   end
@@ -77,11 +86,25 @@ defmodule ImageCachingServerWeb.ImageController do
   defp send_success_response(%Plug.Conn{} = conn, image_data, timing) do
     log_timing("Request completed", timing)
 
+    # Get the path from the timing map
+    path = timing.path
+
+    # Set aggressive caching headers since our images are content-addressed
+    # Cache for 1 year (31536000 seconds)
     conn
     |> put_resp_content_type(get_content_type(image_data))
+    |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
+    |> put_resp_header("expires", format_expires_header(31536000))
+    |> put_resp_header("etag", HashUtils.etag_from_path(path) || HashUtils.generate_etag(image_data))
     |> send_resp(200, image_data)
   end
 
+  # Format expires header in RFC 1123 format
+  defp format_expires_header(max_age_seconds) do
+    DateTime.utc_now()
+    |> DateTime.add(max_age_seconds, :second)
+    |> Calendar.strftime("%a, %d %b %Y %H:%M:%S GMT")
+  end
 
   @spec send_error_response(Plug.Conn.t(), atom(), String.t(), request_timing()) :: Plug.Conn.t()
   defp send_error_response(%Plug.Conn{} = conn, status, message, timing) when is_binary(message) do

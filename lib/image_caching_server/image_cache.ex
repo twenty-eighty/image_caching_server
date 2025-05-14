@@ -1,6 +1,7 @@
 defmodule ImageCachingServer.ImageCache do
   use GenServer, restart: :permanent
   require Logger
+  alias ImageCachingServer.HashUtils
 
   @cache_dir System.get_env("CACHE_DIR", "priv/cache")
   @max_cache_size String.to_integer(System.get_env("MAX_CACHE_SIZE_MB", "1024")) * 1024 * 1024
@@ -23,6 +24,9 @@ defmodule ImageCachingServer.ImageCache do
     Logger.info("Cache directory initialized at #{@cache_dir}")
     Logger.info("Max cache size: #{@max_cache_size / 1024 / 1024}MB, Eviction threshold: #{@eviction_threshold / 1024 / 1024}MB")
 
+    # Clear any files with MD5 hashes
+    clear_md5_files()
+
     # Initialize total size counter
     ConCache.put(:size_cache, :total_size, 0)
 
@@ -30,6 +34,36 @@ defmodule ImageCachingServer.ImageCache do
     rebuild_cache_state()
 
     {:ok, %{}}
+  end
+
+  defp clear_md5_files do
+    case File.ls(@cache_dir) do
+      {:ok, files} ->
+        md5_files = files
+          |> Enum.filter(fn file ->
+            # Extract hash portion from filename
+            hash = case String.split(file, ".") do
+              [hash, _ext] -> hash
+              ["scaled_" <> rest, _ext] -> String.split(rest, ".") |> hd()
+              _ -> nil
+            end
+            # Check if it's an MD5 hash
+            hash && HashUtils.is_md5_hash?(hash)
+          end)
+
+        if length(md5_files) > 0 do
+          Logger.warning("Found #{length(md5_files)} files with MD5 hashes, clearing them")
+
+          Enum.each(md5_files, fn file ->
+            path = Path.join(@cache_dir, file)
+            File.rm(path)
+            Logger.info("Removed MD5-hashed file: #{file}")
+          end)
+        end
+
+      {:error, reason} ->
+        Logger.error("Failed to read cache directory while clearing MD5 files: #{inspect(reason)}")
+    end
   end
 
   def terminate(reason, _state) do
@@ -126,7 +160,7 @@ defmodule ImageCachingServer.ImageCache do
   def handle_call({:get_image, url, width}, _from, state) do
     # First check if we have the scaled version
     scaled_key = "#{url}_#{width}"
-    scaled_hash = :crypto.hash(:md5, scaled_key) |> Base.encode16()
+    scaled_hash = HashUtils.hash_string(scaled_key)
     # Check for both WebP and GIF versions of scaled image
     scaled_webp = Path.join(@cache_dir, "scaled_#{scaled_hash}.webp")
     scaled_gif = Path.join(@cache_dir, "scaled_#{scaled_hash}.gif")
@@ -169,7 +203,7 @@ defmodule ImageCachingServer.ImageCache do
   end
 
   defp get_or_download_image(url) do
-    hash = :crypto.hash(:md5, url) |> Base.encode16()
+    hash = HashUtils.hash_string(url)
     # We'll determine the extension after downloading for new files
     temp_path = Path.join(@cache_dir, "#{hash}.tmp")
 
