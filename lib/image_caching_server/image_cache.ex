@@ -287,28 +287,39 @@ defmodule ImageCachingServer.ImageCache do
     # Trim any whitespace from the URL first
     trimmed_url = String.trim(url)
 
-    case URI.parse(trimmed_url) do
-      %URI{scheme: scheme, host: host}
-      when scheme in ["http", "https"] and is_binary(host) and byte_size(host) > 0 ->
-        # Ensure the URL is properly encoded
-        encoded_url = trimmed_url
-        |> String.replace(" ", "%20")
-        |> URI.parse()
-        |> URI.to_string()
+    # Check if this is a URL to our own server and extract the original URL if it is
+    case extract_url_from_own_server(trimmed_url) do
+      {:own_server, nested_url} ->
+        # Recursively validate the extracted URL
+        validate_url(nested_url)
 
-        {:ok, encoded_url}
+      :not_own_server ->
+        # Continue with regular URL validation
+        uri = URI.parse(trimmed_url)
 
-      %URI{scheme: nil} ->
-        {:error, "Missing URL scheme (http/https)"}
+        case uri do
+          %URI{scheme: scheme, host: host}
+          when scheme in ["http", "https"] and is_binary(host) and byte_size(host) > 0 ->
+            # Ensure the URL is properly encoded
+            encoded_url = trimmed_url
+            |> String.replace(" ", "%20")
+            |> URI.parse()
+            |> URI.to_string()
 
-      %URI{host: nil} ->
-        {:error, "Missing host in URL"}
+            {:ok, encoded_url}
 
-      %URI{scheme: scheme} when scheme not in ["http", "https"] ->
-        {:error, "Invalid URL scheme: #{scheme}"}
+          %URI{scheme: nil} ->
+            {:error, "Missing URL scheme (http/https)"}
 
-      _ ->
-        {:error, "Invalid URL format"}
+          %URI{host: nil} ->
+            {:error, "Missing host in URL"}
+
+          %URI{scheme: scheme} when scheme not in ["http", "https"] ->
+            {:error, "Invalid URL scheme: #{scheme}"}
+
+          _ ->
+            {:error, "Invalid URL format"}
+        end
     end
   end
 
@@ -318,6 +329,36 @@ defmodule ImageCachingServer.ImageCache do
 
   defp validate_url(_) do
     {:error, "Invalid URL type"}
+  end
+
+  # Extract nested URL if the URL is from our own domain
+  defp extract_url_from_own_server(url) do
+    own_domains = [
+      System.get_env("PHX_HOST", "image-caching-server.onrender.com"),
+      "localhost",
+      "127.0.0.1"
+    ]
+
+    uri = URI.parse(url)
+
+    # Check if URI host matches any of our own domains
+    if uri.host != nil && uri.scheme in ["http", "https"] && Enum.member?(own_domains, uri.host) do
+      Logger.info("Detected URL to our own server: #{url}")
+
+      # Extract the original url from the query parameters
+      query_params = URI.decode_query(uri.query || "")
+      case Map.get(query_params, "url") do
+        nil ->
+          Logger.warning("URL to our own server doesn't contain a url parameter: #{url}")
+          # Just continue processing the original URL
+          :not_own_server
+        nested_url ->
+          Logger.info("Extracted nested URL: #{nested_url}")
+          {:own_server, nested_url}
+      end
+    else
+      :not_own_server
+    end
   end
 
   defp get_image_format(path) do

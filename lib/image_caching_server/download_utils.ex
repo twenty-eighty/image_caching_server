@@ -74,8 +74,6 @@ defmodule ImageCachingServer.DownloadUtils do
     end
   end
 
-
-
   # Use system curl command which often handles TLS issues better
   defp download_with_curl(url) do
     Logger.debug("Attempting curl download: #{url}")
@@ -132,8 +130,6 @@ defmodule ImageCachingServer.DownloadUtils do
         end
     end
   end
-
-
 
   @doc """
   RECOMMENDED NATIVE CLIENT: Based on our systematic tests, Req is the most reliable
