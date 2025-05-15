@@ -21,6 +21,38 @@ defmodule ImageCachingServer.DownloadUtils do
       {:ok, body} when is_binary(body) and byte_size(body) > 100 ->
         Logger.info("Downloaded image using Req client: #{url}")
         {:ok, body, :req}
+      {:error, "HTTP status: 404"} ->
+        # Don't fall back to curl for 404 errors - the resource doesn't exist
+        Logger.info("Image not found (404) for URL: #{url}")
+        {:error, "Image not found (404)"}
+      {:error, "HTTP status: 403"} ->
+        # Access forbidden - curl won't help here
+        Logger.info("Access forbidden (403) for URL: #{url}")
+        {:error, "Access forbidden (403)"}
+      {:error, "HTTP status: 401"} ->
+        # Authentication required - curl won't help without credentials
+        Logger.info("Authentication required (401) for URL: #{url}")
+        {:error, "Authentication required (401)"}
+      {:error, "HTTP status: 410"} ->
+        # Resource gone permanently - curl won't help
+        Logger.info("Resource permanently removed (410) for URL: #{url}")
+        {:error, "Resource permanently removed (410)"}
+      {:error, "HTTP status: 400"} ->
+        # Bad request - client error, curl won't help
+        Logger.info("Bad request (400) for URL: #{url}")
+        {:error, "Bad request (400)"}
+      {:error, "HTTP status: 405"} ->
+        # Method not allowed - client error, curl won't help
+        Logger.info("Method not allowed (405) for URL: #{url}")
+        {:error, "Method not allowed (405)"}
+      {:error, "HTTP status: 429"} ->
+        # Rate limiting - retry with curl would likely also be rate limited
+        Logger.info("Rate limited (429) for URL: #{url}")
+        {:error, "Rate limited (429) - too many requests"}
+      {:error, "HTTP status: 451"} ->
+        # Unavailable for legal reasons - won't be accessible with curl either
+        Logger.info("Content unavailable for legal reasons (451) for URL: #{url}")
+        {:error, "Content unavailable for legal reasons (451)"}
       error ->
         Logger.debug("Req download attempt result: #{inspect(error)}")
         if error != {:error, "Req library not available"} do
