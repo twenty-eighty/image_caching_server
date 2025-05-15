@@ -42,7 +42,8 @@ defmodule ImageCachingServer.MixProject do
       {:mogrify, "~> 0.9.3"},
       {:con_cache, "~> 1.0"},
       {:req, "~> 0.4.0"}, # Modern HTTP client for improved downloads
-      {:cors_plug, "~> 3.0"}
+      {:cors_plug, "~> 3.0"},
+      {:dialyxir, "~> 1.3", only: [:dev], runtime: false} # Static analysis tool
     ]
   end
 

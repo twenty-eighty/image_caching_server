@@ -32,9 +32,35 @@ defmodule ImageCachingServerWeb.ImageController do
     else
       {:error, :invalid_width} ->
         send_error_response(conn, :bad_request, "Invalid width parameter", timing)
+
       {:error, :file_read_error, reason} ->
         error_message = "Failed to read scaled image: #{inspect(reason)}"
         send_error_response(conn, :internal_server_error, error_message, timing)
+
+      # Handle HTTP errors with their specific status codes
+      {:error, {:http_error, status, description}} ->
+        log_timing("HTTP error (#{status}): #{description}", timing)
+
+        # Map common HTTP status codes to appropriate Phoenix status atoms
+        phoenix_status = case status do
+          400 -> :bad_request
+          401 -> :unauthorized
+          403 -> :forbidden
+          404 -> :not_found
+          405 -> :method_not_allowed
+          410 -> :gone
+          429 -> :too_many_requests
+          451 -> :unavailable_for_legal_reasons
+          _ -> :bad_request  # Default fallback
+        end
+
+        send_error_response(conn, phoenix_status, description, timing)
+
+      # Handle file too small errors
+      {:error, {:file_error, :too_small, size}} ->
+        error_message = "Downloaded file too small: #{size} bytes"
+        send_error_response(conn, :bad_request, error_message, timing)
+
       {:error, reason} when is_binary(reason) ->
         if String.contains?(reason, "Failed to download image") do
           # Log the failure and redirect to original URL
@@ -74,7 +100,10 @@ defmodule ImageCachingServerWeb.ImageController do
   defp validate_width(_), do: {:error, :invalid_width}
 
   @spec get_cached_image(String.t(), pos_integer(), request_timing()) ::
-    {:ok, String.t()} | {:error, String.t()}
+    {:ok, String.t()} |
+    {:error, String.t()} |
+    {:error, {:http_error, integer(), String.t()}} |
+    {:error, {:file_error, atom(), integer()}}
   defp get_cached_image(url, width, _timing) do
     Logger.info("Processing request: url=#{url} width=#{width}")
     ImageCachingServer.ImageCache.get_image(url, width)

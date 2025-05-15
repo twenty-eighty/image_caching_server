@@ -121,15 +121,30 @@ defmodule ImageCachingServer.ImageCache do
     evict_files(rest, size_to_free - size)
   end
 
+  @spec get_image(String.t(), pos_integer()) ::
+    {:ok, String.t()} |
+    {:error, String.t()} |
+    {:error, {:http_error, integer(), String.t()}} |
+    {:error, {:file_error, atom(), integer()}}
   def get_image(url, width) do
     case GenServer.call(__MODULE__, {:get_image, url, width}, @genserver_timeout) do
       {:ok, path} -> {:ok, path}
-      {:error, reason} -> {:error, reason}
+      {:error, _reason} = error -> error
     end
   end
 
   def handle_call({:get_image, url, width}, _from, state) do
     # First check if we have the scaled version
+    case find_scaled_image(url, width) do
+      {:ok, scaled_path} ->
+        {:reply, {:ok, scaled_path}, state}
+      :not_found ->
+        process_unscaled_image(url, width, state)
+    end
+  end
+
+  # Find a scaled version of the image if it exists
+  defp find_scaled_image(url, width) do
     scaled_key = "#{url}_#{width}"
     scaled_hash = HashUtils.hash_string(scaled_key)
     # Check for both WebP and GIF versions of scaled image
@@ -139,41 +154,63 @@ defmodule ImageCachingServer.ImageCache do
     cond do
       File.exists?(scaled_webp) ->
         Logger.info("Cache hit for scaled WebP image width=#{width}")
-        {:reply, {:ok, scaled_webp}, state}
+        {:ok, scaled_webp}
       File.exists?(scaled_gif) ->
         Logger.info("Cache hit for scaled GIF image width=#{width}")
-        {:reply, {:ok, scaled_gif}, state}
+        {:ok, scaled_gif}
       true ->
-        # No scaled version, check/get original
-        case get_or_download_image(url) do
-          {:ok, original_path} ->
-            # Get original image dimensions
-            case get_image_dimensions(original_path) do
-              {:ok, original_width, _height} ->
-                if width > original_width do
-                  Logger.info("Requested width #{width} exceeds original width #{original_width}, using original")
-                  {:reply, {:ok, original_path}, state}
-                else
-                  # Determine output path based on whether input is GIF
-                  image = Mogrify.open(original_path)
-                  is_gif = String.downcase(image.format || "") == "gif"
-                  scaled_path = if is_gif, do: scaled_gif, else: scaled_webp
-
-                  case scale_image(original_path, scaled_path, width) do
-                    {:ok, path} -> {:reply, {:ok, path}, state}
-                    {:error, reason} -> {:reply, {:error, reason}, state}
-                  end
-                end
-              {:error, reason} ->
-                {:reply, {:error, "Failed to get image dimensions: #{reason}"}, state}
-            end
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
+        :not_found
     end
   end
 
+  # Process the request when no scaled image is found
+  defp process_unscaled_image(url, width, state) do
+    # No scaled version, check/get original
+    case get_or_download_image(url) do
+      {:ok, original_path} ->
+        handle_original_image(original_path, width, state)
+      # Pass through all error types, including HTTP errors
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
 
+  # Handle the original image for scaling or direct use
+  defp handle_original_image(original_path, width, state) do
+    # Get original image dimensions
+    case get_image_dimensions(original_path) do
+      {:ok, original_width, _height} ->
+        if width > original_width do
+          Logger.info("Requested width #{width} exceeds original width #{original_width}, using original")
+          {:reply, {:ok, original_path}, state}
+        else
+          scale_image_for_response(original_path, width, state)
+        end
+      {:error, reason} ->
+        {:reply, {:error, "Failed to get image dimensions: #{reason}"}, state}
+    end
+  end
+
+  # Scale the image and prepare the response
+  defp scale_image_for_response(original_path, width, state) do
+    # Determine output path based on whether input is GIF
+    image = Mogrify.open(original_path)
+    is_gif = String.downcase(image.format || "") == "gif"
+
+    # Generate appropriate scaled path
+    scaled_key = "#{HashUtils.extract_hash_from_path(original_path)}_#{width}"
+    scaled_hash = HashUtils.hash_string(scaled_key)
+    scaled_path = if is_gif do
+      Path.join(@cache_dir, "scaled_#{scaled_hash}.gif")
+    else
+      Path.join(@cache_dir, "scaled_#{scaled_hash}.webp")
+    end
+
+    case scale_image(original_path, scaled_path, width) do
+      {:ok, path} -> {:reply, {:ok, path}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
 
   defp get_or_download_image(url) do
     hash = HashUtils.hash_string(url)
@@ -209,44 +246,67 @@ defmodule ImageCachingServer.ImageCache do
     Logger.info("Downloading image from #{url}")
 
     # Validate and parse URL
-    case validate_url(url) do
-      {:ok, valid_url} ->
-        # Use the optimized download function
-        case ImageCachingServer.DownloadUtils.download_image_v2(valid_url) do
-          {:ok, image_data, client} when is_binary(image_data) ->
-            Logger.info("Downloaded image (#{byte_size(image_data)} bytes) using #{client} client")
-
-            # First ensure cache has space - this now always returns :ok
-            ensure_cache_size(byte_size(image_data))
-
-            # Save the image to cache
-            case save_image_to_cache(image_data, temp_path, hash) do
-              {:ok, final_path} ->
-                Logger.info("Successfully saved image to #{final_path}")
-                {:ok, final_path}
-              {:error, save_reason} ->
-                File.rm(temp_path)
-                Logger.error("Failed to save image: #{inspect(save_reason)}")
-                {:error, save_reason}
-            end
-
-          {:error, download_reason} ->
-            # Clean up temporary file if it exists
-            File.rm(temp_path)
-            Logger.error("Failed to download image: #{inspect(download_reason)}")
-            {:error, download_reason}
-
-          unexpected ->
-            # Handle unexpected return value
-            File.rm(temp_path)
-            Logger.error("Unexpected download result: #{inspect(unexpected)}")
-            {:error, "Unexpected download result"}
-        end
-
-      {:error, validation_reason} ->
+    with {:ok, valid_url} <- validate_url(url),
+         {:ok, result} <- download_and_process_image(valid_url, temp_path, hash) do
+      # Unwrap the actual result
+      result
+    else
+      {:error, validation_reason} when is_binary(validation_reason) ->
         Logger.error("Invalid URL: #{inspect(validation_reason)}")
         {:error, validation_reason}
     end
+  end
+
+  # Download the image and process it if successful
+  defp download_and_process_image(url, temp_path, hash) do
+    case ImageCachingServer.DownloadUtils.download_image_v2(url) do
+      {:ok, image_data, client} when is_binary(image_data) ->
+        Logger.info("Downloaded image (#{byte_size(image_data)} bytes) using #{client} client")
+        process_downloaded_image(image_data, temp_path, hash)
+
+      # Use a single pattern to handle all error types
+      {:error, _reason} = error ->
+        cleanup_and_handle_error(error, temp_path)
+    end
+  end
+
+  # Process an image that was successfully downloaded
+  defp process_downloaded_image(image_data, temp_path, hash) do
+    # First ensure cache has space - this now always returns :ok
+    ensure_cache_size(byte_size(image_data))
+
+    # Save the image to cache
+    case save_image_to_cache(image_data, temp_path, hash) do
+      {:ok, final_path} ->
+        Logger.info("Successfully saved image to #{final_path}")
+        {:ok, {:ok, final_path}}
+      {:error, save_reason} ->
+        File.rm(temp_path)
+        Logger.error("Failed to save image: #{inspect(save_reason)}")
+        {:ok, {:error, save_reason}}
+    end
+  end
+
+  # Clean up and handle download errors
+  defp cleanup_and_handle_error({:error, {:http_error, status, description}} = error, temp_path) do
+    # Clean up temporary file if it exists
+    File.rm(temp_path)
+    Logger.error("Failed to download image: HTTP error #{status}: #{description}")
+    {:ok, error}
+  end
+
+  defp cleanup_and_handle_error({:error, {:file_error, :too_small, size}} = error, temp_path) do
+    # Clean up temporary file if it exists
+    File.rm(temp_path)
+    Logger.error("Failed to download image: file too small (#{size} bytes)")
+    {:ok, error}
+  end
+
+  defp cleanup_and_handle_error({:error, download_reason} = error, temp_path) do
+    # Clean up temporary file if it exists
+    File.rm(temp_path)
+    Logger.error("Failed to download image: #{inspect(download_reason)}")
+    {:ok, error}
   end
 
   defp save_image_to_cache(image_data, temp_path, hash) do
@@ -396,55 +456,80 @@ defmodule ImageCachingServer.ImageCache do
   defp scale_image(input_path, output_path, width) do
     Logger.info("Scaling image #{input_path} to width #{width}")
     try do
-      # Get original file size to estimate scaled size
-      {:ok, %{size: original_size}} = File.stat(input_path)
-      # Estimate scaled size (conservative estimate)
-      estimated_size = original_size
-      ensure_cache_size(estimated_size)
+      # Get original file size and ensure we have space
+      ensure_space_for_scaling(input_path)
 
-      # Determine if input is GIF
-      image = Mogrify.open(input_path)
-      is_gif = String.downcase(image.format || "") == "gif"
+      # Determine file format and adjust output path
+      {image, output_path} = prepare_image_for_scaling(input_path, output_path)
 
-      # If GIF, ensure output path has .gif extension, otherwise use WebP
-      output_path = if is_gif do
-        String.replace(output_path, ~r/\.webp$/, ".gif")
-      else
-        String.replace(output_path, ~r/\.[^.]+$/, ".webp")
-      end
+      # Perform the actual scaling
+      scaled_image = perform_image_scaling(image, width)
 
-      image
-      |> Mogrify.resize("#{width}x")
-      |> Mogrify.format(if(is_gif, do: "gif", else: "webp"))
-      # Add WebP optimization options for non-GIFs using ImageMagick parameters
-      |> then(fn img ->
-        if is_gif do
-          img
-        else
-          img
-          |> Mogrify.quality("85")
-          |> Mogrify.custom("define", "webp:lossless=false")
-          |> Mogrify.custom("define", "webp:auto-filter=true")
-        end
-      end)
-      |> Mogrify.save(path: output_path)
-
-      if File.exists?(output_path) do
-        # Track file size
-        {:ok, %{size: actual_size}} = File.stat(output_path)
-        ConCache.put(:size_cache, "size_scaled_#{Path.basename(output_path)}", actual_size)
-        current_size = ConCache.get(:size_cache, :total_size) || 0
-        ConCache.put(:size_cache, :total_size, current_size + actual_size)
-
-        Logger.info("Successfully scaled and cached image at #{output_path} (#{actual_size / 1024 / 1024}MB)")
-        {:ok, output_path}
-      else
-        {:error, "Failed to save scaled image"}
-      end
+      # Save the scaled image
+      save_scaled_image(scaled_image, output_path)
     rescue
       e ->
         Logger.error("Error scaling image: #{inspect(e)}")
         {:error, "Error scaling image: #{inspect(e)}"}
+    end
+  end
+
+  # Ensure we have enough space for the scaled image
+  defp ensure_space_for_scaling(input_path) do
+    {:ok, %{size: original_size}} = File.stat(input_path)
+    ensure_cache_size(original_size)
+  end
+
+  # Prepare the image and output path for scaling
+  defp prepare_image_for_scaling(input_path, output_path) do
+    image = Mogrify.open(input_path)
+    is_gif = String.downcase(image.format || "") == "gif"
+
+    # If GIF, ensure output path has .gif extension, otherwise use WebP
+    adjusted_output_path = if is_gif do
+      String.replace(output_path, ~r/\.webp$/, ".gif")
+    else
+      String.replace(output_path, ~r/\.[^.]+$/, ".webp")
+    end
+
+    {image, adjusted_output_path}
+  end
+
+  # Perform the actual image scaling
+  defp perform_image_scaling(image, width) do
+    is_gif = String.downcase(image.format || "") == "gif"
+
+    image
+    |> Mogrify.resize("#{width}x")
+    |> Mogrify.format(if(is_gif, do: "gif", else: "webp"))
+    # Add WebP optimization options for non-GIFs using ImageMagick parameters
+    |> then(fn img ->
+      if is_gif do
+        img
+      else
+        img
+        |> Mogrify.quality("85")
+        |> Mogrify.custom("define", "webp:lossless=false")
+        |> Mogrify.custom("define", "webp:auto-filter=true")
+      end
+    end)
+  end
+
+  # Save the scaled image and update size tracking
+  defp save_scaled_image(image, output_path) do
+    Mogrify.save(image, path: output_path)
+
+    if File.exists?(output_path) do
+      # Track file size
+      {:ok, %{size: actual_size}} = File.stat(output_path)
+      ConCache.put(:size_cache, "size_scaled_#{Path.basename(output_path)}", actual_size)
+      current_size = ConCache.get(:size_cache, :total_size) || 0
+      ConCache.put(:size_cache, :total_size, current_size + actual_size)
+
+      Logger.info("Successfully scaled and cached image at #{output_path} (#{actual_size / 1024 / 1024}MB)")
+      {:ok, output_path}
+    else
+      {:error, "Failed to save scaled image"}
     end
   end
 

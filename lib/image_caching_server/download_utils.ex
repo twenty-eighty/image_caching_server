@@ -21,41 +21,13 @@ defmodule ImageCachingServer.DownloadUtils do
       {:ok, body} when is_binary(body) and byte_size(body) > 100 ->
         Logger.info("Downloaded image using Req client: #{url}")
         {:ok, body, :req}
-      {:error, "HTTP status: 404"} ->
-        # Don't fall back to curl for 404 errors - the resource doesn't exist
-        Logger.info("Image not found (404) for URL: #{url}")
-        {:error, "Image not found (404)"}
-      {:error, "HTTP status: 403"} ->
-        # Access forbidden - curl won't help here
-        Logger.info("Access forbidden (403) for URL: #{url}")
-        {:error, "Access forbidden (403)"}
-      {:error, "HTTP status: 401"} ->
-        # Authentication required - curl won't help without credentials
-        Logger.info("Authentication required (401) for URL: #{url}")
-        {:error, "Authentication required (401)"}
-      {:error, "HTTP status: 410"} ->
-        # Resource gone permanently - curl won't help
-        Logger.info("Resource permanently removed (410) for URL: #{url}")
-        {:error, "Resource permanently removed (410)"}
-      {:error, "HTTP status: 400"} ->
-        # Bad request - client error, curl won't help
-        Logger.info("Bad request (400) for URL: #{url}")
-        {:error, "Bad request (400)"}
-      {:error, "HTTP status: 405"} ->
-        # Method not allowed - client error, curl won't help
-        Logger.info("Method not allowed (405) for URL: #{url}")
-        {:error, "Method not allowed (405)"}
-      {:error, "HTTP status: 429"} ->
-        # Rate limiting - retry with curl would likely also be rate limited
-        Logger.info("Rate limited (429) for URL: #{url}")
-        {:error, "Rate limited (429) - too many requests"}
-      {:error, "HTTP status: 451"} ->
-        # Unavailable for legal reasons - won't be accessible with curl either
-        Logger.info("Content unavailable for legal reasons (451) for URL: #{url}")
-        {:error, "Content unavailable for legal reasons (451)"}
-      error ->
-        Logger.debug("Req download attempt result: #{inspect(error)}")
-        if error != {:error, "Req library not available"} do
+      {:error, {:http_error, status, description}} ->
+        # Pass HTTP error codes to the caller in structured format
+        Logger.info("HTTP error (#{status}): #{description} for URL: #{url}")
+        {:error, {:http_error, status, description}}
+      {:error, reason} ->
+        Logger.debug("Req download attempt result: #{inspect(reason)}")
+        if reason != "Req library not available" do
           Logger.info("Req client failed, falling back to curl: #{url}")
         end
 
@@ -66,7 +38,7 @@ defmodule ImageCachingServer.DownloadUtils do
             {:ok, body, :curl}
           {:ok, body} ->
             Logger.warning("Downloaded file too small (#{byte_size(body)} bytes): #{url}", [])
-            {:error, "Downloaded file too small: #{byte_size(body)} bytes"}
+            {:error, {:file_error, :too_small, byte_size(body)}}
           error ->
             Logger.warning("Curl download failed: #{inspect(error)}", [])
             error
@@ -141,35 +113,12 @@ defmodule ImageCachingServer.DownloadUtils do
 
     if Code.ensure_loaded?(Req) do
       try do
-
-
         # Use all the options that worked well in our tests
-        case Req.get(url,
-          # Important options that help with TLS issues - using simpler config to avoid errors
-          connect_options: [
-            transport_opts: [
-              verify: :verify_none  # Skip strict certificate verification
-              # Don't specify cipher_suites or versions to use defaults
-            ]
-          ],
-          max_redirects: 10,         # Handle more redirects than default
-          retry: :transient,         # Auto-retry on network errors
-          # Browser-like headers help with some servers that check for browser requests
-          user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
-          headers: [
-            {"accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"},
-            {"accept-language", "en-US,en;q=0.9"}
-          ]
-        ) do
-          {:ok, %{status: 200, body: body}} when is_binary(body) and byte_size(body) > 100 ->
-            Logger.debug("Req download successful: #{byte_size(body)} bytes")
-            {:ok, body}
+        case make_req_request(url) do
           {:ok, %{status: 200, body: body}} ->
-            Logger.warning("Req downloaded file too small: #{byte_size(body)} bytes", [])
-            {:error, "Downloaded file too small: #{byte_size(body)} bytes"}
+            handle_successful_req_response(body)
           {:ok, %{status: status}} ->
-            Logger.warning("Req HTTP error status: #{status}", [])
-            {:error, "HTTP status: #{status}"}
+            handle_req_error_status(status)
           {:error, error} ->
             Logger.warning("Req error: #{inspect(error)}", [])
             {:error, "Req error: #{inspect(error)}"}
@@ -183,5 +132,56 @@ defmodule ImageCachingServer.DownloadUtils do
       Logger.warning("Req library not available", [])
       {:error, "Req library not available"}
     end
+  end
+
+  # Makes the actual HTTP request with Req
+  defp make_req_request(url) do
+    Req.get(url,
+      # Important options that help with TLS issues - using simpler config to avoid errors
+      connect_options: [
+        transport_opts: [
+          verify: :verify_none  # Skip strict certificate verification
+          # Don't specify cipher_suites or versions to use defaults
+        ]
+      ],
+      max_redirects: 10,         # Handle more redirects than default
+      retry: :transient,         # Auto-retry on network errors
+      # Browser-like headers help with some servers that check for browser requests
+      user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
+      headers: [
+        {"accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"},
+        {"accept-language", "en-US,en;q=0.9"}
+      ]
+    )
+  end
+
+  # Handle a successful (status 200) Req response
+  defp handle_successful_req_response(body) when is_binary(body) and byte_size(body) > 100 do
+    Logger.debug("Req download successful: #{byte_size(body)} bytes")
+    {:ok, body}
+  end
+
+  defp handle_successful_req_response(body) do
+    Logger.warning("Req downloaded file too small: #{byte_size(body)} bytes", [])
+    {:error, "Downloaded file too small: #{byte_size(body)} bytes"}
+  end
+
+  # Maps HTTP status codes to their description
+  @http_status_descriptions %{
+    400 => "Bad Request",
+    401 => "Unauthorized",
+    403 => "Forbidden",
+    404 => "Not Found",
+    405 => "Method Not Allowed",
+    410 => "Gone",
+    429 => "Too Many Requests",
+    451 => "Unavailable For Legal Reasons"
+  }
+
+  # Handle HTTP error status codes
+  defp handle_req_error_status(status) do
+    description = Map.get(@http_status_descriptions, status, "HTTP Error")
+    Logger.warning("Req HTTP error status: #{status}", [])
+    {:error, {:http_error, status, description}}
   end
 end
