@@ -32,14 +32,17 @@ defmodule ImageCachingServer.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:phoenix, "~> 1.7.10"},
+      {:phoenix, "~> 1.7.0"},
+
+
+      {:telemetry_metrics, "~> 0.6"},
+      {:gettext, "~> 0.20"},
+      {:jason, "~> 1.2"},
       {:plug_cowboy, "~> 2.5"},
-      {:httpoison, "~> 2.0"},
       {:mogrify, "~> 0.9.3"},
       {:con_cache, "~> 1.0"},
-      {:jason, "~> 1.2"},
-      {:gettext, "~> 0.20"},
-      {:telemetry_metrics, "~> 0.6"}
+      {:req, "~> 0.4.0"}, # Modern HTTP client for improved downloads
+      {:cors_plug, "~> 3.0"}
     ]
   end
 

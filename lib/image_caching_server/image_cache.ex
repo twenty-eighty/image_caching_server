@@ -81,6 +81,9 @@ defmodule ImageCachingServer.ImageCache do
       Logger.info("Cache size (#{projected_size / 1024 / 1024}MB) would exceed threshold, running LRU eviction")
       evict_lru_files(projected_size - @eviction_threshold)
     end
+
+    # Return :ok explicitly to match in case statement
+    :ok
   end
 
   defp evict_lru_files(size_to_free) do
@@ -170,31 +173,7 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  @doc """
-  Transforms URLs for various CDN providers to their direct access URLs.
-  This helps bypass redirects and handle special CDN requirements.
 
-  Currently handles:
-  - nostr.build: Converts cdn.nostr.build to pfp.nostr.build and adjusts paths.
-    This is needed because cdn.nostr.build uses Cloudflare and requires specific
-    HTTP/2 pseudo-headers and browser-like headers to return a 301 redirect.
-    Going directly to pfp.nostr.build bypasses these requirements.
-  - nostr.build main domain: Converts nostr.build/i/ URLs to image.nostr.build
-  """
-  def transform_cdn_url(url) when is_binary(url) do
-    uri = URI.parse(url)
-
-    cond do
-      String.contains?(uri.host || "", "cdn.nostr.build") ->
-        path = String.replace_prefix(uri.path, "/i/p/", "/")
-        "https://pfp.nostr.build#{path}"
-      uri.host == "nostr.build" and String.starts_with?(uri.path || "", "/i/") ->
-        path = String.replace_prefix(uri.path, "/i/", "/")
-        "https://image.nostr.build#{path}"
-      true ->
-        url
-    end
-  end
 
   defp get_or_download_image(url) do
     hash = HashUtils.hash_string(url)
@@ -232,75 +211,75 @@ defmodule ImageCachingServer.ImageCache do
     # Validate and parse URL
     case validate_url(url) do
       {:ok, valid_url} ->
-        Logger.debug("Using validated URL: #{valid_url}")
+        # Use the optimized download function
+        case ImageCachingServer.DownloadUtils.download_image_v2(valid_url) do
+          {:ok, image_data, client} when is_binary(image_data) ->
+            Logger.info("Downloaded image (#{byte_size(image_data)} bytes) using #{client} client")
 
-        # Handle nostr.build CDN redirect manually
-        final_url = transform_cdn_url(valid_url)
-        headers = [
-          {"Host", URI.parse(final_url).host},
-          {"User-Agent", "curl/8.5.0"},
-          {"Accept", "*/*"}
-        ]
-
-        case HTTPoison.get(final_url, headers, [
-          follow_redirect: true,
-          hackney: [
-            cookie: [],
-            follow_redirect: true,
-            ssl_options: [
-              {:verify, :verify_none}
-            ]
-          ],
-          recv_timeout: 30_000
-        ]) do
-          {:ok, %{status_code: _status_code, body: image_data}} ->
+            # First ensure cache has space - this now always returns :ok
             ensure_cache_size(byte_size(image_data))
 
-            # First save to temporary file
-            case File.write(temp_path, image_data) do
-              :ok ->
-                # Get the original format and save with correct extension
-                case get_image_format(temp_path) do
-                  {:ok, format} ->
-                    final_path = Path.join(@cache_dir, "#{hash}.#{format}")
-                    case File.rename(temp_path, final_path) do
-                      :ok ->
-                        # Track file size
-                        {:ok, %{size: size}} = File.stat(final_path)
-                        ConCache.put(:size_cache, "size_#{Path.basename(final_path)}", size)
-                        current_size = ConCache.get(:size_cache, :total_size) || 0
-                        ConCache.put(:size_cache, :total_size, current_size + size)
-
-                        Logger.info("Successfully downloaded and cached image at #{final_path} (#{size / 1024 / 1024}MB)")
-                        {:ok, final_path}
-                      {:error, reason} ->
-                        File.rm(temp_path)
-                        Logger.error("Failed to rename temporary file: #{inspect(reason)}")
-                        {:error, "Failed to rename temporary file: #{inspect(reason)}"}
-                    end
-                  {:error, reason} ->
-                    File.rm(temp_path)
-                    Logger.error("Failed to determine image format: #{inspect(reason)}")
-                    {:error, "Failed to determine image format: #{inspect(reason)}"}
-                end
-              {:error, reason} ->
-                Logger.error("Failed to save temporary image: #{inspect(reason)}")
-                {:error, "Failed to save temporary image: #{inspect(reason)}"}
+            # Save the image to cache
+            case save_image_to_cache(image_data, temp_path, hash) do
+              {:ok, final_path} ->
+                Logger.info("Successfully saved image to #{final_path}")
+                {:ok, final_path}
+              {:error, save_reason} ->
+                File.rm(temp_path)
+                Logger.error("Failed to save image: #{inspect(save_reason)}")
+                {:error, save_reason}
             end
 
-          {:ok, %{status_code: status_code, headers: resp_headers}} ->
-            Logger.error("Failed to download image, status code: #{status_code}, headers: #{inspect(resp_headers)}")
-            {:error, "Failed to download image, status code: #{status_code}"}
+          {:error, download_reason} ->
+            # Clean up temporary file if it exists
+            File.rm(temp_path)
+            Logger.error("Failed to download image: #{inspect(download_reason)}")
+            {:error, download_reason}
 
-          {:error, %{reason: reason}} ->
-            Logger.error("Failed to download image: #{inspect(reason)}")
-            {:error, "Failed to download image: #{inspect(reason)}"}
+          unexpected ->
+            # Handle unexpected return value
+            File.rm(temp_path)
+            Logger.error("Unexpected download result: #{inspect(unexpected)}")
+            {:error, "Unexpected download result"}
         end
 
-      {:error, reason} ->
-        Logger.error("Invalid URL #{url}: #{reason}")
-        {:error, "Invalid URL: #{reason}"}
+      {:error, validation_reason} ->
+        Logger.error("Invalid URL: #{inspect(validation_reason)}")
+        {:error, validation_reason}
     end
+  end
+
+  defp save_image_to_cache(image_data, temp_path, hash) do
+    # First save to temporary file
+    with :ok <- File.write(temp_path, image_data),
+         {:ok, format} <- get_image_format(temp_path) do
+
+      final_path = Path.join(@cache_dir, "#{hash}.#{format}")
+
+      case File.rename(temp_path, final_path) do
+        :ok ->
+          # Track file size in cache
+          update_cache_size_tracking(final_path)
+          {:ok, final_path}
+
+        {:error, reason} ->
+          Logger.error("Failed to rename temporary file: #{inspect(reason)}")
+          {:error, "Failed to rename temporary file: #{inspect(reason)}"}
+      end
+    else
+      {:error, reason} ->
+        Logger.error("Failed to save or process image: #{inspect(reason)}")
+        {:error, "Failed to save or process image: #{inspect(reason)}"}
+    end
+  end
+
+  defp update_cache_size_tracking(file_path) do
+    {:ok, %{size: size}} = File.stat(file_path)
+    ConCache.put(:size_cache, "size_#{Path.basename(file_path)}", size)
+    current_size = ConCache.get(:size_cache, :total_size) || 0
+    ConCache.put(:size_cache, :total_size, current_size + size)
+
+    Logger.info("Successfully cached image at #{file_path} (#{size / 1024 / 1024}MB)")
   end
 
   @spec validate_url(String.t()) :: {:ok, String.t()} | {:error, String.t()}

@@ -125,6 +125,53 @@ The server will be available at `http://localhost:4002`.
 - Validates URLs before processing
 - Limits maximum cache size to prevent disk space issues
 
+## Image Download Troubleshooting
+
+The image caching server uses a robust download system to handle various image sources. We've optimized the download strategy after extensive testing with problematic URLs.
+
+We've implemented the following improvements:
+
+1. Used a dual-strategy approach with Req client as primary and curl-based fallback
+2. Removed unnecessary HTTP client dependencies (HTTPoison)
+3. Fixed TLS version atoms (changing :`tlsv1.2` to `:tlsv1_2`)
+4. Simplified URL handling by using direct URLs without transformation
+5. Added better error handling to prevent crashes during downloads
+
+### Current Download Strategy
+
+After systematic testing with various problematic URLs, we've implemented a reliable download strategy:
+
+1. **Primary: Req HTTP Client**: A modern Elixir HTTP client with optimized TLS settings for maximum compatibility
+2. **Fallback: System.cmd with curl**: When Req fails, the system falls back to curl which has proven to be the most reliable option
+
+This dual-strategy approach provides both:
+- Fast downloads with the native Elixir client for most URLs
+- Maximum compatibility with difficult servers via curl fallback
+
+### Testing the Download System
+
+You can test the download functionality with problematic URLs using:
+
+```bash
+mix run test_downloader.exs
+```
+
+For a more comprehensive test across multiple HTTP clients:
+
+```bash
+mix run test_native_clients.exs
+```
+
+## Code Optimization
+
+The server has been optimized in several ways:
+
+1. Removed unnecessary UI-related dependencies (esbuild, tailwind, phoenix_html, etc.)
+2. Fixed Logger.warn deprecation warnings by changing to Logger.warning
+3. Ensured proper return values from functions to avoid pattern match errors
+4. Removed unused URL transformation code
+5. Simplified error handling and validation
+
 ## License
 
 MIT 
