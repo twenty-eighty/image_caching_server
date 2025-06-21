@@ -48,8 +48,14 @@ defmodule ImageCachingServer.ImageCache do
     # Find all files in cache directory
     case File.ls(@cache_dir) do
       {:ok, files} ->
+        Logger.info("Found #{length(files)} files in cache directory: #{inspect(files |> Enum.take(10))}")
+
         original_files = Enum.filter(files, &(!String.starts_with?(&1, "scaled_")))
         scaled_files = Enum.filter(files, &(String.starts_with?(&1, "scaled_")))
+
+        Logger.info("Filtered: #{length(original_files)} original, #{length(scaled_files)} scaled")
+        if length(original_files) > 0, do: Logger.info("Sample original files: #{inspect(Enum.take(original_files, 3))}")
+        if length(scaled_files) > 0, do: Logger.info("Sample scaled files: #{inspect(Enum.take(scaled_files, 3))}")
 
         total_size = Enum.reduce(files, 0, fn file, acc ->
           path = Path.join(@cache_dir, file)
@@ -58,7 +64,9 @@ defmodule ImageCachingServer.ImageCache do
               # Track individual file sizes
               ConCache.put(:size_cache, "size_#{file}", size)
               acc + size
-            _ -> acc
+            {:error, stat_reason} ->
+              Logger.warning("Failed to stat file #{file}: #{inspect(stat_reason)}")
+              acc
           end
         end)
 
