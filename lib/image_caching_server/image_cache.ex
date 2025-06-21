@@ -183,7 +183,7 @@ defmodule ImageCachingServer.ImageCache do
     # No scaled version, check/get original
     case get_or_download_image(url) do
       {:ok, original_path} ->
-        handle_original_image(original_path, width, state)
+        handle_original_image(original_path, width, state, url)
       # Pass through all error types, including HTTP errors
       {:error, _reason} = error ->
         {:reply, error, state}
@@ -191,7 +191,7 @@ defmodule ImageCachingServer.ImageCache do
   end
 
   # Handle the original image for scaling or direct use
-  defp handle_original_image(original_path, width, state) do
+  defp handle_original_image(original_path, width, state, url) do
     # Get original image dimensions
     case get_image_dimensions(original_path) do
       {:ok, original_width, _height} ->
@@ -199,7 +199,7 @@ defmodule ImageCachingServer.ImageCache do
           Logger.info("Requested width #{width} exceeds original width #{original_width}, using original")
           {:reply, {:ok, original_path}, state}
         else
-          scale_image_for_response(original_path, width, state)
+          scale_image_for_response(original_path, width, state, url)
         end
       {:error, reason} ->
         {:reply, {:error, "Failed to get image dimensions: #{reason}"}, state}
@@ -207,13 +207,13 @@ defmodule ImageCachingServer.ImageCache do
   end
 
   # Scale the image and prepare the response
-  defp scale_image_for_response(original_path, width, state) do
+  defp scale_image_for_response(original_path, width, state, url) do
     # Determine output path based on whether input is GIF
     image = Mogrify.open(original_path)
     is_gif = String.downcase(image.format || "") == "gif"
 
-    # Generate appropriate scaled path
-    scaled_key = "#{HashUtils.extract_hash_from_path(original_path)}_#{width}"
+    # Generate appropriate scaled path using the same key as lookup
+    scaled_key = "#{url}_#{width}"
     scaled_hash = HashUtils.hash_string(scaled_key)
     scaled_path = if is_gif do
       Path.join(@cache_dir, "scaled_#{scaled_hash}.gif")
