@@ -73,18 +73,7 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  defp ensure_cache_size(new_file_size) do
-    current_size = ConCache.get(:size_cache, :total_size) || 0
-    projected_size = current_size + new_file_size
 
-    if projected_size > @eviction_threshold do
-      Logger.info("Cache size (#{projected_size / 1024 / 1024}MB) would exceed threshold, running LRU eviction")
-      evict_lru_files(projected_size - @eviction_threshold)
-    end
-
-    # Return :ok explicitly to match in case statement
-    :ok
-  end
 
   defp evict_lru_files(size_to_free) do
     # Get all files with their last access times
@@ -134,7 +123,18 @@ defmodule ImageCachingServer.ImageCache do
   end
 
   def handle_call({:get_image, url, width}, _from, state) do
-    # First check if we have the scaled version
+    # First run cache eviction if needed to make space upfront
+    # We estimate the space needed for both original and scaled images
+    estimated_space_needed = 2 * 1024 * 1024  # 2MB estimate per image
+    current_size = ConCache.get(:size_cache, :total_size) || 0
+    projected_size = current_size + estimated_space_needed
+
+    if projected_size > @eviction_threshold do
+      Logger.info("Preemptive cache eviction before processing image request")
+      evict_lru_files(projected_size - @eviction_threshold)
+    end
+
+    # Now check if we have the scaled version
     case find_scaled_image(url, width) do
       {:ok, scaled_path} ->
         {:reply, {:ok, scaled_path}, state}
@@ -272,10 +272,7 @@ defmodule ImageCachingServer.ImageCache do
 
   # Process an image that was successfully downloaded
   defp process_downloaded_image(image_data, temp_path, hash) do
-    # First ensure cache has space - this now always returns :ok
-    ensure_cache_size(byte_size(image_data))
-
-    # Save the image to cache
+    # Save the image to cache (eviction already done upfront)
     case save_image_to_cache(image_data, temp_path, hash) do
       {:ok, final_path} ->
         Logger.info("Successfully saved image to #{final_path}")
@@ -309,7 +306,7 @@ defmodule ImageCachingServer.ImageCache do
     {:ok, error}
   end
 
-  defp save_image_to_cache(image_data, temp_path, hash) do
+    defp save_image_to_cache(image_data, temp_path, hash) do
     # First save to temporary file
     with :ok <- File.write(temp_path, image_data),
          {:ok, format} <- get_image_format(temp_path) do
@@ -453,12 +450,9 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  defp scale_image(input_path, output_path, width) do
+    defp scale_image(input_path, output_path, width) do
     Logger.info("Scaling image #{input_path} to width #{width}")
     try do
-      # Get original file size and ensure we have space
-      ensure_space_for_scaling(input_path)
-
       # Determine file format and adjust output path
       {image, output_path} = prepare_image_for_scaling(input_path, output_path)
 
@@ -474,11 +468,7 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  # Ensure we have enough space for the scaled image
-  defp ensure_space_for_scaling(input_path) do
-    {:ok, %{size: original_size}} = File.stat(input_path)
-    ensure_cache_size(original_size)
-  end
+
 
   # Prepare the image and output path for scaling
   defp prepare_image_for_scaling(input_path, output_path) do
@@ -554,4 +544,5 @@ defmodule ImageCachingServer.ImageCache do
     Logger.warning("Received unexpected message: #{inspect(msg)}")
     {:noreply, state}
   end
+
 end
