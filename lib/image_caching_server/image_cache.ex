@@ -4,8 +4,15 @@ defmodule ImageCachingServer.ImageCache do
   alias ImageCachingServer.HashUtils
 
   @cache_dir System.get_env("CACHE_DIR", "priv/cache")
-  @max_cache_size String.to_integer(System.get_env("MAX_CACHE_SIZE_MB", "1024")) * 1024 * 1024
-  @eviction_threshold @max_cache_size * 0.9
+
+  # Read cache size at runtime, not compile time
+  defp max_cache_size do
+    String.to_integer(System.get_env("MAX_CACHE_SIZE_MB", "1024")) * 1024 * 1024
+  end
+
+  defp eviction_threshold do
+    max_cache_size() * 0.9
+  end
   # Increase timeout to 30 seconds for large image processing
   @genserver_timeout 30_000
 
@@ -22,7 +29,7 @@ defmodule ImageCachingServer.ImageCache do
     # Ensure cache directory exists
     File.mkdir_p!(@cache_dir)
     Logger.info("Cache directory initialized at #{@cache_dir}")
-    Logger.info("Max cache size: #{@max_cache_size / 1024 / 1024}MB, Eviction threshold: #{@eviction_threshold / 1024 / 1024}MB")
+    Logger.info("Max cache size: #{max_cache_size() / 1024 / 1024}MB, Eviction threshold: #{eviction_threshold() / 1024 / 1024}MB")
 
     # Initialize total size counter
     ConCache.put(:size_cache, :total_size, 0)
@@ -137,9 +144,9 @@ defmodule ImageCachingServer.ImageCache do
     current_size = ConCache.get(:size_cache, :total_size) || 0
     projected_size = current_size + estimated_space_needed
 
-    if projected_size > @eviction_threshold do
+    if projected_size > eviction_threshold() do
       Logger.info("Preemptive cache eviction before processing image request")
-      evict_lru_files(projected_size - @eviction_threshold)
+      evict_lru_files(projected_size - eviction_threshold())
     end
 
     # Now check if we have the scaled version
