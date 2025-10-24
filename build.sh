@@ -14,4 +14,7 @@ mix deps.get --only prod
 mix deps.compile --all
 mix compile
 
+echo "Building release..."
+mix release --overwrite
+
 echo "Build completed successfully!"

@@ -1,4 +1,9 @@
-FROM hexpm/elixir:1.14.5-erlang-25.3.2.3-debian-bullseye-20230227 as build
+FROM elixir:1.18-slim as build
+
+# Ensure certificates and git are available during build to avoid TLS issues
+RUN apt-get update -y && \
+    apt-get install -y ca-certificates git && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy build script and make it executable
 COPY build.sh /app/build.sh
@@ -14,11 +19,11 @@ COPY . .
 RUN ./build.sh
 
 # Start a new build stage
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Install runtime dependencies (already in build script, but needed for runtime)
 RUN apt-get update -y && \
-    apt-get install -y imagemagick file libstdc++6 openssl libncurses5 locales && \
+    apt-get install -y imagemagick file libstdc++6 openssl libncurses5 locales curl ca-certificates && \
     apt-get clean && rm -f /var/lib/apt/lists/*_*
 
 # Set the locale
@@ -40,6 +45,7 @@ VOLUME /cache
 ENV MIX_ENV=prod
 ENV PORT=4000
 ENV CACHE_DIR=/cache
+ENV PHX_SERVER=true
 
 # Run the Phoenix app
-CMD ["bin/image_caching_server", "start"] 
+CMD ["bin/image_caching_server", "start"]
