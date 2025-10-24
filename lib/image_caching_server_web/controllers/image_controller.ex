@@ -62,9 +62,12 @@ defmodule ImageCachingServerWeb.ImageController do
         send_error_response(conn, :bad_request, error_message, timing)
 
       {:error, reason} when is_binary(reason) ->
-        if String.contains?(reason, "Failed to download image") do
-          # Log the failure and redirect to original URL
-          log_timing("Redirecting to original URL due to download failure", timing)
+        # On download or scaling failures, redirect to the original URL
+        if String.contains?(reason, "Failed to download image")
+           or String.contains?(reason, "Error scaling image")
+           or String.contains?(reason, "Failed to save scaled image")
+           or String.contains?(reason, "Failed to get image dimensions") do
+          log_timing("Redirecting to original URL due to processing failure", timing)
           conn
           |> put_status(302)
           |> put_resp_header("location", url)
