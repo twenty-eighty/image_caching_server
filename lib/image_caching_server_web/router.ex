@@ -5,6 +5,12 @@ defmodule ImageCachingServerWeb.Router do
     plug :accepts, ["json"]
   end
 
+  scope "/", ImageCachingServerWeb do
+    pipe_through :api
+
+    get "/", HealthController, :index
+  end
+
   scope "/api", ImageCachingServerWeb do
     pipe_through :api
 

@@ -1,4 +1,4 @@
-FROM elixir:1.18-slim as build
+FROM elixir:1.20-slim as build
 
 # Ensure certificates and git are available during build to avoid TLS issues
 RUN apt-get update -y && \

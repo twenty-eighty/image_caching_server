@@ -11,6 +11,10 @@ services:
     startCommand: "./_build/prod/rel/image_caching_server/bin/image_caching_server start"
     autoDeploy: true
     envVars:
+      - key: ELIXIR_VERSION
+        value: "1.20.1"
+      - key: ERLANG_VERSION
+        value: "28.3"
       - key: MIX_ENV
         value: prod
       - key: PHX_SERVER
