@@ -8,11 +8,13 @@ services:
     repo: https://github.com/twenty-eighty/image_caching_server
     env: prod
     buildCommand: "./build.sh"
-    startCommand: "mix phx.server"
+    startCommand: "./_build/prod/rel/image_caching_server/bin/image_caching_server start"
     autoDeploy: true
     envVars:
       - key: MIX_ENV
         value: prod
+      - key: PHX_SERVER
+        value: "true"
       - key: PORT
         value: 80
       - key: CACHE_DIR

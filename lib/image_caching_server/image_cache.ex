@@ -13,8 +13,11 @@ defmodule ImageCachingServer.ImageCache do
   defp eviction_threshold do
     max_cache_size() * 0.9
   end
-  # Increase timeout to 30 seconds for large image processing
-  @genserver_timeout 30_000
+
+  defp max_concurrent_ops do
+    String.to_integer(System.get_env("MAX_CONCURRENT_IMAGE_OPS", "4"))
+  end
+  @genserver_timeout 60_000
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
@@ -37,7 +40,7 @@ defmodule ImageCachingServer.ImageCache do
     # Calculate initial cache size
     rebuild_cache_state()
 
-    {:ok, %{}}
+    {:ok, %{in_flight: %{}, active_count: 0, pending: []}}
   end
 
 
@@ -137,10 +140,59 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  def handle_call({:get_image, url, width}, _from, state) do
-    # First run cache eviction if needed to make space upfront
-    # We estimate the space needed for both original and scaled images
-    estimated_space_needed = 2 * 1024 * 1024  # 2MB estimate per image
+  def handle_call({:get_image, url, width}, from, state) do
+    case find_scaled_image(url, width) do
+      {:ok, scaled_path} ->
+        {:reply, {:ok, scaled_path}, state}
+
+      :not_found ->
+        key = {url, width}
+
+        case Map.get(state.in_flight, key) do
+          %{waiters: waiters} ->
+            updated =
+              put_in(state.in_flight, [key, :waiters], [from | waiters])
+
+            {:noreply, %{state | in_flight: updated}}
+
+          nil ->
+            enqueue_or_start(key, url, width, from, state)
+        end
+    end
+  end
+
+  defp enqueue_or_start(key, url, width, from, state) do
+    if state.active_count >= max_concurrent_ops() do
+      {:noreply, %{state | pending: state.pending ++ [{key, url, width, from}]}}
+    else
+      start_async_processing(key, url, width, from, state)
+    end
+  end
+
+  defp start_async_processing(key, url, width, from, state) do
+    task =
+      Task.Supervisor.async_nolink(ImageCachingServer.ImageTaskSupervisor, fn ->
+        do_process_image(url, width)
+      end)
+
+    monitor_ref = Process.monitor(task.pid)
+
+    in_flight_entry = %{
+      task_ref: task.ref,
+      monitor_ref: monitor_ref,
+      waiters: [from]
+    }
+
+    {:noreply,
+     %{
+       state
+       | in_flight: Map.put(state.in_flight, key, in_flight_entry),
+         active_count: state.active_count + 1
+     }}
+  end
+
+  defp do_process_image(url, width) do
+    estimated_space_needed = 2 * 1024 * 1024
     current_size = ConCache.get(:size_cache, :total_size) || 0
     projected_size = current_size + estimated_space_needed
 
@@ -149,13 +201,79 @@ defmodule ImageCachingServer.ImageCache do
       evict_lru_files(projected_size - eviction_threshold())
     end
 
-    # Now check if we have the scaled version
-    case find_scaled_image(url, width) do
-      {:ok, scaled_path} ->
-        {:reply, {:ok, scaled_path}, state}
-      :not_found ->
-        process_unscaled_image(url, width, state)
+    case get_or_download_image(url) do
+      {:ok, original_path} ->
+        process_original_image(original_path, width, url)
+
+      {:error, _reason} = error ->
+        error
     end
+  end
+
+  def handle_info({ref, result}, state) when is_reference(ref) do
+    case find_in_flight_by_task_ref(state, ref) do
+      {key, %{waiters: waiters, monitor_ref: monitor_ref}} ->
+        Process.demonitor(monitor_ref, [:flush])
+        reply_to_waiters(waiters, result)
+        {:noreply, complete_processing(state, key)}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, _monitor_ref, :process, _pid, :normal}, state) do
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, monitor_ref, :process, _pid, reason}, state) do
+    case find_in_flight_by_monitor_ref(state, monitor_ref) do
+      {key, %{waiters: waiters}} ->
+        reply_to_waiters(waiters, {:error, "Image processing crashed: #{inspect(reason)}"})
+        {:noreply, complete_processing(state, key)}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:EXIT, port, :normal}, state) when is_port(port) do
+    {:noreply, state}
+  end
+
+  def handle_info(msg, state) do
+    Logger.warning("Received unexpected message: #{inspect(msg)}")
+    {:noreply, state}
+  end
+
+  defp reply_to_waiters(waiters, result) do
+    Enum.each(waiters, &GenServer.reply(&1, result))
+  end
+
+  defp complete_processing(state, key) do
+    state
+    |> Map.update!(:in_flight, &Map.delete(&1, key))
+    |> Map.update!(:active_count, &max(&1 - 1, 0))
+    |> start_next_pending()
+  end
+
+  defp start_next_pending(%{pending: []} = state), do: state
+
+  defp start_next_pending(%{pending: [{key, url, width, from} | rest]} = state) do
+    if state.active_count >= max_concurrent_ops() do
+      %{state | pending: [{key, url, width, from} | rest]}
+    else
+      {:noreply, new_state} = start_async_processing(key, url, width, from, %{state | pending: rest})
+      new_state
+    end
+  end
+
+  defp find_in_flight_by_task_ref(state, ref) do
+    Enum.find(state.in_flight, fn {_key, entry} -> entry.task_ref == ref end)
+  end
+
+  defp find_in_flight_by_monitor_ref(state, ref) do
+    Enum.find(state.in_flight, fn {_key, entry} -> entry.monitor_ref == ref end)
   end
 
   # Find a scaled version of the image if it exists
@@ -178,39 +296,34 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  # Process the request when no scaled image is found
-  defp process_unscaled_image(url, width, state) do
-    # No scaled version, check/get original
-    case get_or_download_image(url) do
-      {:ok, original_path} ->
-        handle_original_image(original_path, width, state, url)
-      # Pass through all error types, including HTTP errors
-      {:error, _reason} = error ->
-        {:reply, error, state}
-    end
-  end
-
-  # Handle the original image for scaling or direct use
-  defp handle_original_image(original_path, width, state, url) do
-    # Get original image dimensions
+  # Process the original image for scaling or direct use
+  defp process_original_image(original_path, width, url) do
     case get_image_dimensions(original_path) do
       {:ok, original_width, _height} ->
         if width > original_width do
           Logger.info("Requested width #{width} exceeds original width #{original_width}, using original")
-          {:reply, {:ok, original_path}, state}
+          {:ok, original_path}
         else
-          scale_image_for_response(original_path, width, state, url)
+          scale_image_for_response(original_path, width, url)
         end
+
       {:error, reason} ->
-        {:reply, {:error, "Failed to get image dimensions: #{reason}"}, state}
+        {:error, "Failed to get image dimensions: #{reason}"}
+    end
+  end
+
+  defp image_gif?(image) do
+    case Map.get(image, :format) do
+      format when is_binary(format) -> String.downcase(format) == "gif"
+      _ -> false
     end
   end
 
   # Scale the image and prepare the response
-  defp scale_image_for_response(original_path, width, state, url) do
+  defp scale_image_for_response(original_path, width, url) do
     # Determine output path based on whether input is GIF
     image = Mogrify.open(original_path)
-    is_gif = String.downcase(image.format || "") == "gif"
+    is_gif = image_gif?(image)
 
     # Generate appropriate scaled path using the same key as lookup
     scaled_key = "#{url}_#{width}"
@@ -222,8 +335,8 @@ defmodule ImageCachingServer.ImageCache do
     end
 
     case scale_image(original_path, scaled_path, width) do
-      {:ok, path} -> {:reply, {:ok, path}, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -488,7 +601,7 @@ defmodule ImageCachingServer.ImageCache do
   # Prepare the image and output path for scaling
   defp prepare_image_for_scaling(input_path, output_path) do
     image = Mogrify.open(input_path)
-    is_gif = String.downcase(image.format || "") == "gif"
+    is_gif = image_gif?(image)
 
     # If GIF, ensure output path has .gif extension, otherwise use WebP
     adjusted_output_path = if is_gif do
@@ -502,7 +615,7 @@ defmodule ImageCachingServer.ImageCache do
 
   # Perform the actual image scaling
   defp perform_image_scaling(image, width) do
-    is_gif = String.downcase(image.format || "") == "gif"
+    is_gif = image_gif?(image)
 
     image
     |> Mogrify.resize("#{width}x")
@@ -547,17 +660,6 @@ defmodule ImageCachingServer.ImageCache do
         Logger.error("Error getting image dimensions: #{inspect(e)}")
         {:error, inspect(e)}
     end
-  end
-
-  # Handle normal port exits from ImageMagick operations
-  def handle_info({:EXIT, port, :normal}, state) when is_port(port) do
-    {:noreply, state}
-  end
-
-  # Catch-all handler for unexpected messages
-  def handle_info(msg, state) do
-    Logger.warning("Received unexpected message: #{inspect(msg)}")
-    {:noreply, state}
   end
 
 end

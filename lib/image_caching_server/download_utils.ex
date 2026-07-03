@@ -6,6 +6,8 @@ defmodule ImageCachingServer.DownloadUtils do
 
   require Logger
 
+  @download_timeout_ms 15_000
+
   @doc """
   Improved download image function that tries multiple methods in order of reliability.
   Based on systematic testing across problematic URLs.
@@ -65,7 +67,7 @@ defmodule ImageCachingServer.DownloadUtils do
           result = System.cmd(curl_path, [
             "--silent",
             "--location",
-            "--max-time", "30",
+            "--max-time", Integer.to_string(div(@download_timeout_ms, 1000)),
             "--output", output_path,
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
             url
@@ -137,6 +139,7 @@ defmodule ImageCachingServer.DownloadUtils do
   # Makes the actual HTTP request with Req
   defp make_req_request(url) do
     Req.get(url,
+      receive_timeout: @download_timeout_ms,
       # Important options that help with TLS issues - using simpler config to avoid errors
       connect_options: [
         transport_opts: [

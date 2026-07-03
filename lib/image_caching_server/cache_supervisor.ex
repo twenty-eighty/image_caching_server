@@ -30,6 +30,7 @@ defmodule ImageCachingServer.CacheSupervisor do
         },
         id: :size_cache_no_ttl
       ),
+      {Task.Supervisor, name: ImageCachingServer.ImageTaskSupervisor},
       # Start the Image Cache GenServer
       {ImageCachingServer.ImageCache, []}
     ]

@@ -3,7 +3,6 @@ defmodule ImageCachingServer.HashUtils do
   Utilities for consistent hashing across the application.
   Uses SHA256 for all hashing needs.
   """
-  require Logger
 
   @doc """
   Generate a hash for a string value.
