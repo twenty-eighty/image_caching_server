@@ -15,8 +15,27 @@ defmodule ImageCachingServer.ImageCache do
   end
 
   defp max_concurrent_ops do
-    String.to_integer(System.get_env("MAX_CONCURRENT_IMAGE_OPS", "4"))
+    env_int("MAX_CONCURRENT_IMAGE_OPS", 1)
   end
+
+  defp max_image_width, do: env_int("MAX_IMAGE_WIDTH", 8192)
+  defp max_image_height, do: env_int("MAX_IMAGE_HEIGHT", 8192)
+  defp max_image_pixels, do: env_int("MAX_IMAGE_PIXELS", 16_777_216)
+  defp convert_timeout_sec, do: env_int("CONVERT_TIMEOUT_SEC", 15)
+  defp identify_timeout_sec, do: env_int("IDENTIFY_TIMEOUT_SEC", 5)
+
+  defp magick_memory_limit, do: System.get_env("MAGICK_MEMORY_LIMIT", "64MB")
+  defp magick_map_limit, do: System.get_env("MAGICK_MAP_LIMIT", "64MB")
+  defp magick_area_limit, do: System.get_env("MAGICK_AREA_LIMIT", "16MP")
+  defp magick_disk_limit, do: System.get_env("MAGICK_DISK_LIMIT", "256MB")
+
+  defp env_int(name, default) do
+    case Integer.parse(System.get_env(name, "")) do
+      {n, _} when n > 0 -> n
+      _ -> default
+    end
+  end
+
   @genserver_timeout 60_000
 
   def start_link(_opts) do
@@ -33,6 +52,11 @@ defmodule ImageCachingServer.ImageCache do
     File.mkdir_p!(@cache_dir)
     Logger.info("Cache directory initialized at #{@cache_dir}")
     Logger.info("Max cache size: #{max_cache_size() / 1024 / 1024}MB, Eviction threshold: #{eviction_threshold() / 1024 / 1024}MB")
+    Logger.info(
+      "Image decode limits: #{max_image_width()}x#{max_image_height()} / #{max_image_pixels()}px, " <>
+        "convert timeout #{convert_timeout_sec()}s, concurrent ops #{max_concurrent_ops()}, " <>
+        "magick memory=#{magick_memory_limit()} area=#{magick_area_limit()}"
+    )
 
     # Initialize total size counter
     ConCache.put(:size_cache, :total_size, 0)
@@ -298,46 +322,47 @@ defmodule ImageCachingServer.ImageCache do
 
   # Process the original image for scaling or direct use
   defp process_original_image(original_path, width, url) do
-    case get_image_dimensions(original_path) do
-      {:ok, original_width, _height} ->
-        if width > original_width do
-          Logger.info("Requested width #{width} exceeds original width #{original_width}, using original")
-          {:ok, original_path}
-        else
-          scale_image_for_response(original_path, width, url)
+    case identify_image(original_path) do
+      {:ok, info} ->
+        cond do
+          gif?(info.format) ->
+            Logger.info("Skipping scale for GIF, serving original to preserve animation")
+            {:ok, original_path}
+
+          not safe_to_decode?(info) ->
+            Logger.warning(
+              "Image exceeds decode limits (#{info.width}x#{info.height} #{info.format}), serving original"
+            )
+            {:ok, original_path}
+
+          width >= info.width ->
+            Logger.info("Requested width #{width} exceeds original width #{info.width}, using original")
+            {:ok, original_path}
+
+          true ->
+            scale_image_for_response(original_path, width, url)
         end
 
       {:error, reason} ->
-        {:error, "Failed to get image dimensions: #{reason}"}
+        Logger.warning("Failed to identify image (#{reason}), serving original to avoid decode")
+        {:ok, original_path}
     end
   end
 
-  defp image_gif?(image) do
-    case Map.get(image, :format) do
-      format when is_binary(format) -> String.downcase(format) == "gif"
-      _ -> false
-    end
+  defp gif?(format) when is_binary(format), do: String.starts_with?(format, "gif")
+  defp gif?(_), do: false
+
+  defp safe_to_decode?(%{width: w, height: h}) when is_integer(w) and is_integer(h) do
+    w > 0 and h > 0 and w <= max_image_width() and h <= max_image_height() and w * h <= max_image_pixels()
   end
 
   # Scale the image and prepare the response
   defp scale_image_for_response(original_path, width, url) do
-    # Determine output path based on whether input is GIF
-    image = Mogrify.open(original_path)
-    is_gif = image_gif?(image)
-
-    # Generate appropriate scaled path using the same key as lookup
     scaled_key = "#{url}_#{width}"
     scaled_hash = HashUtils.hash_string(scaled_key)
-    scaled_path = if is_gif do
-      Path.join(@cache_dir, "scaled_#{scaled_hash}.gif")
-    else
-      Path.join(@cache_dir, "scaled_#{scaled_hash}.webp")
-    end
+    scaled_path = Path.join(@cache_dir, "scaled_#{scaled_hash}.webp")
 
-    case scale_image(original_path, scaled_path, width) do
-      {:ok, path} -> {:ok, path}
-      {:error, reason} -> {:error, reason}
-    end
+    scale_image(original_path, scaled_path, width)
   end
 
   defp get_or_download_image(url) do
@@ -547,98 +572,76 @@ defmodule ImageCachingServer.ImageCache do
   end
 
   defp get_image_format(path) do
-    try do
-      # First try with Mogrify identify
-      case Mogrify.identify(path) do
-        %{format: format} when is_binary(format) and format != "" ->
-          {:ok, String.downcase(format)}
-        _ ->
-          # Fallback to using file command if format is nil or empty
-          case System.cmd("file", ["--mime-type", "-b", path]) do
-            {mime, 0} ->
-              format = case String.trim(mime) do
-                "image/jpeg" -> "jpg"
-                "image/png" -> "png"
-                "image/gif" -> "gif"
-                "image/webp" -> "webp"
-                mime ->
-                  Logger.warning("Unexpected MIME type: #{mime}, defaulting to jpg")
-                  "jpg"
-              end
-              {:ok, format}
-            {error, _} ->
-              Logger.error("Failed to determine format using file command: #{error}")
-              {:error, "Could not determine format"}
-          end
-      end
-    rescue
-      e ->
-        Logger.error("Error in get_image_format: #{inspect(e)}")
-        {:error, "Failed to determine image format: #{inspect(e)}"}
+    case identify_image(path) do
+      {:ok, %{format: format}} ->
+        {:ok, normalize_ext(format)}
+
+      {:error, identify_reason} ->
+        Logger.warning("identify failed for format detection (#{identify_reason}), falling back to file")
+
+        case System.cmd("file", ["--mime-type", "-b", path], stderr_to_stdout: true) do
+          {mime, 0} ->
+            {:ok, mime_to_ext(String.trim(mime))}
+
+          {error, _} ->
+            Logger.error("Failed to determine format using file command: #{error}")
+            {:error, "Could not determine format"}
+        end
     end
+  rescue
+    e ->
+      Logger.error("Error in get_image_format: #{inspect(e)}")
+      {:error, "Failed to determine image format: #{inspect(e)}"}
   end
 
-    defp scale_image(input_path, output_path, width) do
+  defp normalize_ext("jpg"), do: "jpeg"
+  defp normalize_ext("jpeg"), do: "jpeg"
+  defp normalize_ext(format) when is_binary(format), do: format
+
+  defp mime_to_ext("image/jpeg"), do: "jpeg"
+  defp mime_to_ext("image/png"), do: "png"
+  defp mime_to_ext("image/gif"), do: "gif"
+  defp mime_to_ext("image/webp"), do: "webp"
+  defp mime_to_ext(mime) do
+    Logger.warning("Unexpected MIME type: #{mime}, defaulting to jpeg")
+    "jpeg"
+  end
+
+  defp scale_image(input_path, output_path, width) do
     Logger.info("Scaling image #{input_path} to width #{width}")
-    try do
-      # Determine file format and adjust output path
-      {image, output_path} = prepare_image_for_scaling(input_path, output_path)
 
-      # Perform the actual scaling
-      scaled_image = perform_image_scaling(image, width)
+    args = [
+      "-limit", "memory", magick_memory_limit(),
+      "-limit", "map", magick_map_limit(),
+      "-limit", "area", magick_area_limit(),
+      "-limit", "disk", magick_disk_limit(),
+      "#{input_path}[0]",
+      "-resize", "#{width}x>",
+      "-strip",
+      "-quality", "85",
+      "-define", "webp:lossless=false",
+      "-define", "webp:auto-filter=true",
+      output_path
+    ]
 
-      # Save the scaled image
-      save_scaled_image(scaled_image, output_path)
-    rescue
-      e ->
-        Logger.error("Error scaling image: #{inspect(e)}")
-        {:error, "Error scaling image: #{inspect(e)}"}
+    case run_magick("convert", args, convert_timeout_sec()) do
+      {:ok, _} ->
+        track_scaled_file(output_path)
+
+      {:error, reason} ->
+        File.rm(output_path)
+        Logger.error("Error scaling image: #{reason}")
+        {:error, "Error scaling image: #{reason}"}
     end
+  rescue
+    e ->
+      File.rm(output_path)
+      Logger.error("Error scaling image: #{inspect(e)}")
+      {:error, "Error scaling image: #{inspect(e)}"}
   end
 
-
-
-  # Prepare the image and output path for scaling
-  defp prepare_image_for_scaling(input_path, output_path) do
-    image = Mogrify.open(input_path)
-    is_gif = image_gif?(image)
-
-    # If GIF, ensure output path has .gif extension, otherwise use WebP
-    adjusted_output_path = if is_gif do
-      String.replace(output_path, ~r/\.webp$/, ".gif")
-    else
-      String.replace(output_path, ~r/\.[^.]+$/, ".webp")
-    end
-
-    {image, adjusted_output_path}
-  end
-
-  # Perform the actual image scaling
-  defp perform_image_scaling(image, width) do
-    is_gif = image_gif?(image)
-
-    image
-    |> Mogrify.resize("#{width}x")
-    |> Mogrify.format(if(is_gif, do: "gif", else: "webp"))
-    # Add WebP optimization options for non-GIFs using ImageMagick parameters
-    |> then(fn img ->
-      if is_gif do
-        img
-      else
-        img
-        |> Mogrify.quality("85")
-        |> Mogrify.custom("define", "webp:lossless=false")
-        |> Mogrify.custom("define", "webp:auto-filter=true")
-      end
-    end)
-  end
-
-  # Save the scaled image and update size tracking
-  defp save_scaled_image(image, output_path) do
-    Mogrify.save(image, path: output_path)
-
+  defp track_scaled_file(output_path) do
     if File.exists?(output_path) do
-      # Track file size
       {:ok, %{size: actual_size}} = File.stat(output_path)
       ConCache.put(:size_cache, "size_scaled_#{Path.basename(output_path)}", actual_size)
       current_size = ConCache.get(:size_cache, :total_size) || 0
@@ -651,15 +654,62 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  defp get_image_dimensions(path) do
-    try do
-      image = Mogrify.open(path)
-      {:ok, image.width, image.height}
-    rescue
-      e ->
-        Logger.error("Error getting image dimensions: #{inspect(e)}")
-        {:error, inspect(e)}
+  # Ping the first frame only so animated/huge files are not decoded.
+  defp identify_image(path) do
+    case run_magick("identify", ["-ping", "-format", "%w %h %m", "#{path}[0]"], identify_timeout_sec()) do
+      {:ok, output} ->
+        case parse_identify_output(output) do
+          {:ok, info} -> {:ok, info}
+          :error -> {:error, "unexpected identify output: #{inspect(String.trim(output))}"}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
+  defp parse_identify_output(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.reverse()
+    |> Enum.find_value(:error, fn line ->
+      case Regex.run(~r/^(\d+)\s+(\d+)\s+(\S+)$/, String.trim(line)) do
+        [_, w, h, format] ->
+          {:ok,
+           %{
+             width: String.to_integer(w),
+             height: String.to_integer(h),
+             format: String.downcase(format)
+           }}
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp run_magick(command, args, timeout_sec) do
+    executable = System.find_executable(command)
+
+    if is_nil(executable) do
+      {:error, "#{command} executable not found"}
+    else
+      {cmd, cmd_args} =
+        case System.find_executable("timeout") do
+          nil -> {executable, args}
+          timeout_bin -> {timeout_bin, [Integer.to_string(timeout_sec), executable | args]}
+        end
+
+      case System.cmd(cmd, cmd_args, stderr_to_stdout: true) do
+        {output, 0} ->
+          {:ok, output}
+
+        {_output, 124} ->
+          {:error, "#{command} timed out after #{timeout_sec}s"}
+
+        {output, code} ->
+          {:error, "#{command} exited #{code}: #{String.slice(output, 0, 400)}"}
+      end
+    end
+  end
 end

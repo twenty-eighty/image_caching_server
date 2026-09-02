@@ -63,10 +63,7 @@ defmodule ImageCachingServerWeb.ImageController do
 
       {:error, reason} when is_binary(reason) ->
         # On download or scaling failures, redirect to the original URL
-        if String.contains?(reason, "Failed to download image")
-           or String.contains?(reason, "Error scaling image")
-           or String.contains?(reason, "Failed to save scaled image")
-           or String.contains?(reason, "Failed to get image dimensions") do
+        if redirect_to_original?(reason) do
           log_timing("Redirecting to original URL due to processing failure", timing)
           conn
           |> put_status(302)
@@ -92,6 +89,14 @@ defmodule ImageCachingServerWeb.ImageController do
   end
 
   # Private helper functions
+
+  defp redirect_to_original?(reason) do
+    String.contains?(reason, "Failed to download image")
+    or String.contains?(reason, "Error scaling image")
+    or String.contains?(reason, "Failed to save scaled image")
+    or String.contains?(reason, "Failed to get image dimensions")
+    or String.contains?(reason, "Image processing crashed")
+  end
 
   @spec validate_width(String.t()) :: {:ok, pos_integer()} | {:error, :invalid_width}
   defp validate_width(width) when is_binary(width) do

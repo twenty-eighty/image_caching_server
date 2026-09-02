@@ -46,6 +46,11 @@ The following environment variables can be used to configure the server:
 - `PORT`: Server port (default: 4000)
 - `CACHE_DIR`: Directory for cached images (default: "priv/cache")
 - `MAX_CACHE_SIZE_MB`: Maximum cache size in megabytes (default: 1024)
+- `MAX_CONCURRENT_IMAGE_OPS`: Max simultaneous ImageMagick jobs (default: 1; sized for 512MB RAM)
+- `MAX_DOWNLOAD_MB`: Maximum source image download size in megabytes (default: 10)
+- `MAX_IMAGE_WIDTH` / `MAX_IMAGE_HEIGHT` / `MAX_IMAGE_PIXELS`: Decode caps (defaults: 8192, 8192, 16777216)
+- `CONVERT_TIMEOUT_SEC`: ImageMagick convert timeout (default: 15)
+- `MAGICK_MEMORY_LIMIT` / `MAGICK_MAP_LIMIT` / `MAGICK_AREA_LIMIT` / `MAGICK_DISK_LIMIT`: ImageMagick resource caps (defaults: 64MB / 64MB / 16MP / 256MB)
 - `ALLOWED_DOMAINS`: Comma-separated list of domains allowed to be source of requests
 - `SECRET_KEY_BASE`: Phoenix secret key base
 - `PHX_HOST`: Host name for production deployment
@@ -113,7 +118,8 @@ The server will be available at `http://localhost:4002`.
 
 - Images are cached both in original and scaled versions
 - Non-GIF images are automatically converted to WebP format for better compression
-- GIF images maintain their original format to preserve animation
+- GIF images are served as-is (not scaled) to preserve animation and bound ImageMagick memory
+- Images larger than the decode limits are served as the original file instead of being resized
 - Cache uses LRU (Least Recently Used) eviction policy
 - Cache is evicted when size exceeds 90% of maximum configured size
 - Cache persists across server restarts

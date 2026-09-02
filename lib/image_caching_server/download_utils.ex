@@ -8,6 +8,13 @@ defmodule ImageCachingServer.DownloadUtils do
 
   @download_timeout_ms 15_000
 
+  defp max_download_bytes do
+    case Integer.parse(System.get_env("MAX_DOWNLOAD_MB", "10")) do
+      {n, _} when n > 0 -> n * 1024 * 1024
+      _ -> 10 * 1024 * 1024
+    end
+  end
+
   @doc """
   Improved download image function that tries multiple methods in order of reliability.
   Based on systematic testing across problematic URLs.
@@ -27,6 +34,9 @@ defmodule ImageCachingServer.DownloadUtils do
         # Pass HTTP error codes to the caller in structured format
         Logger.info("HTTP error (#{status}): #{description} for URL: #{url}")
         {:error, {:http_error, status, description}}
+      {:error, :too_large} ->
+        Logger.warning("Download exceeded #{max_download_bytes()} byte limit: #{url}")
+        {:error, "Failed to download image: file too large"}
       {:error, reason} ->
         Logger.debug("Req download attempt result: #{inspect(reason)}")
         if reason != "Req library not available" do
@@ -41,6 +51,9 @@ defmodule ImageCachingServer.DownloadUtils do
           {:ok, body} ->
             Logger.warning("Downloaded file too small (#{byte_size(body)} bytes): #{url}", [])
             {:error, {:file_error, :too_small, byte_size(body)}}
+          {:error, :too_large} ->
+            Logger.warning("Curl download exceeded #{max_download_bytes()} byte limit: #{url}")
+            {:error, "Failed to download image: file too large"}
           error ->
             Logger.warning("Curl download failed: #{inspect(error)}", [])
             error
@@ -64,10 +77,13 @@ defmodule ImageCachingServer.DownloadUtils do
           Logger.debug("Using curl at path: #{curl_path}")
 
           # Set a reasonable timeout and follow redirects
+          max_bytes = max_download_bytes()
+
           result = System.cmd(curl_path, [
             "--silent",
             "--location",
             "--max-time", Integer.to_string(div(@download_timeout_ms, 1000)),
+            "--max-filesize", Integer.to_string(max_bytes),
             "--output", output_path,
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
             url
@@ -76,20 +92,35 @@ defmodule ImageCachingServer.DownloadUtils do
           case result do
             {_, 0} ->
               if File.exists?(output_path) do
-                data = File.read!(output_path)
-                File.rm!(output_path)
+                case File.stat(output_path) do
+                  {:ok, %{size: size}} when size > max_bytes ->
+                    File.rm(output_path)
+                    Logger.warning("curl download exceeded size limit (#{size} bytes)", [])
+                    {:error, :too_large}
 
-                if byte_size(data) > 100 do
-                  Logger.debug("curl download successful: #{byte_size(data)} bytes")
-                  {:ok, data}
-                else
-                  Logger.warning("curl downloaded file too small: #{byte_size(data)} bytes", [])
-                  {:error, "Downloaded file too small: #{byte_size(data)} bytes"}
+                  {:ok, %{size: size}} when size > 100 ->
+                    data = File.read!(output_path)
+                    File.rm!(output_path)
+                    Logger.debug("curl download successful: #{byte_size(data)} bytes")
+                    {:ok, data}
+
+                  {:ok, %{size: size}} ->
+                    File.rm(output_path)
+                    Logger.warning("curl downloaded file too small: #{size} bytes", [])
+                    {:error, "Downloaded file too small: #{size} bytes"}
+
+                  {:error, stat_reason} ->
+                    File.rm(output_path)
+                    {:error, "Failed to stat curl download: #{inspect(stat_reason)}"}
                 end
               else
                 Logger.warning("curl did not create output file at #{output_path}", [])
                 {:error, "File not downloaded"}
               end
+            {_error, 63} ->
+              File.rm(output_path)
+              Logger.warning("curl download exceeded --max-filesize", [])
+              {:error, :too_large}
             {error, code} ->
               Logger.warning("curl failed with code #{code}: #{error}", [])
               File.rm(output_path)
@@ -117,7 +148,9 @@ defmodule ImageCachingServer.DownloadUtils do
       try do
         # Use all the options that worked well in our tests
         case make_req_request(url) do
-          {:ok, %{status: 200, body: body}} ->
+          {:ok, %{status: 200, body: :too_large}} ->
+            {:error, :too_large}
+          {:ok, %{status: 200, body: body}} when is_binary(body) ->
             handle_successful_req_response(body)
           {:ok, %{status: status}} ->
             handle_req_error_status(status)
@@ -138,6 +171,8 @@ defmodule ImageCachingServer.DownloadUtils do
 
   # Makes the actual HTTP request with Req
   defp make_req_request(url) do
+    max_bytes = max_download_bytes()
+
     Req.get(url,
       receive_timeout: @download_timeout_ms,
       # Important options that help with TLS issues - using simpler config to avoid errors
@@ -154,14 +189,28 @@ defmodule ImageCachingServer.DownloadUtils do
       headers: [
         {"accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"},
         {"accept-language", "en-US,en;q=0.9"}
-      ]
+      ],
+      into: fn {:data, chunk}, {req, resp} ->
+        prev = if is_binary(resp.body), do: resp.body, else: ""
+        new_size = byte_size(prev) + byte_size(chunk)
+
+        if new_size > max_bytes do
+          {:halt, {req, %{resp | body: :too_large}}}
+        else
+          {:cont, {req, %{resp | body: prev <> chunk}}}
+        end
+      end
     )
   end
 
   # Handle a successful (status 200) Req response
   defp handle_successful_req_response(body) when is_binary(body) and byte_size(body) > 100 do
-    Logger.debug("Req download successful: #{byte_size(body)} bytes")
-    {:ok, body}
+    if byte_size(body) > max_download_bytes() do
+      {:error, :too_large}
+    else
+      Logger.debug("Req download successful: #{byte_size(body)} bytes")
+      {:ok, body}
+    end
   end
 
   defp handle_successful_req_response(body) do
