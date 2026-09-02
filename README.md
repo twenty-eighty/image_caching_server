@@ -23,17 +23,20 @@ A Phoenix-based image caching and scaling server that provides an API to scale i
 ### Scale Image
 
 ```
-GET /api/scale?url=<image_url>&width=<target_width>
+GET /api/scale?url=<image_url>&width=<target_width>&s=<hmac>
 ```
 
 Parameters:
-- `url`: The URL of the image to scale (must be from an allowed domain)
+- `url`: The URL of the image to scale
 - `width`: The target width in pixels (height will be scaled proportionally)
+- `s`: HMAC-SHA256 (hex) of `url + "\n" + width` using the calling origin's image cache key
 
 Example:
 ```
-GET /api/scale?url=https://example.com/image.jpg&width=300
+GET /api/scale?url=https://example.com/image.jpg&width=300&s=<64-char-hex>
 ```
+
+The HMAC key is loaded from `https://{Origin-host}/image-cache-key.json` (`current` and optional `previous`). Localhost uses `IMAGE_CACHE_KEY` / `IMAGE_CACHE_KEY_PREVIOUS` instead. If no keys can be loaded, unsigned requests are allowed so a cache-server deploy cannot take images down before origins publish keys.
 
 Response:
 - Success: Returns the scaled image (WebP format for non-GIFs, original format for GIFs)
@@ -52,6 +55,8 @@ The following environment variables can be used to configure the server:
 - `CONVERT_TIMEOUT_SEC`: ImageMagick convert timeout (default: 15)
 - `MAGICK_MEMORY_LIMIT` / `MAGICK_MAP_LIMIT` / `MAGICK_AREA_LIMIT` / `MAGICK_DISK_LIMIT`: ImageMagick resource caps (defaults: 64MB / 64MB / 16MP / 256MB)
 - `ALLOWED_DOMAINS`: Comma-separated list of domains allowed to be source of requests
+- `IMAGE_CACHE_KEY`: HMAC key used for localhost requests
+- `IMAGE_CACHE_KEY_PREVIOUS`: Previous HMAC key for localhost, accepted during rotation
 - `SECRET_KEY_BASE`: Phoenix secret key base
 - `PHX_HOST`: Host name for production deployment
 
@@ -128,6 +133,7 @@ The server will be available at `http://localhost:4002`.
 
 - Only allows image downloads from configured domains
 - Requires Origin or Referer headers for API requests
+- Requires a valid HMAC (`s`) when signing keys are available for the origin
 - Validates URLs before processing
 - Limits maximum cache size to prevent disk space issues
 

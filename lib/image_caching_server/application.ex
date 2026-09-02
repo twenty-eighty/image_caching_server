@@ -12,6 +12,7 @@ defmodule ImageCachingServer.Application do
     children = [
       # Start the PubSub system
       {Phoenix.PubSub, name: ImageCachingServer.PubSub},
+      ImageCachingServer.OriginKeys,
       # Start the Cache Supervisor
       ImageCachingServer.CacheSupervisor,
       # Start the Endpoint (http/https)

@@ -4,6 +4,7 @@ defmodule ImageCachingServerWeb.ImageController do
   alias ImageCachingServer.HashUtils
 
   plug ImageCachingServerWeb.Plugs.VerifyOrigin
+  plug ImageCachingServerWeb.Plugs.VerifyImageHmac
 
   @type request_timing :: %{
     start_time: integer(),

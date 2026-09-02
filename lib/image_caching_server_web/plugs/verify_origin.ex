@@ -14,7 +14,7 @@ defmodule ImageCachingServerWeb.Plugs.VerifyOrigin do
 
     with {:ok, domain, _headers} <- extract_domain(conn),
          true <- domain_allowed?(domain, allowed_domains) do
-      conn
+      assign(conn, :origin_host, domain)
     else
       {:error, :no_origin} ->
         # Log attempt to access without origin/referer
