@@ -96,6 +96,8 @@ defmodule ImageCachingServerWeb.ImageController do
     or String.contains?(reason, "Failed to save scaled image")
     or String.contains?(reason, "Failed to get image dimensions")
     or String.contains?(reason, "Image processing crashed")
+    or String.contains?(reason, "Failed to save or process image")
+    or String.contains?(reason, "not an image")
   end
 
   @spec validate_width(String.t()) :: {:ok, pos_integer()} | {:error, :invalid_width}

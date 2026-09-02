@@ -344,8 +344,9 @@ defmodule ImageCachingServer.ImageCache do
         end
 
       {:error, reason} ->
-        Logger.warning("Failed to identify image (#{reason}), serving original to avoid decode")
-        {:ok, original_path}
+        Logger.warning("Failed to identify image (#{reason}), not serving invalid file")
+        evict_invalid_cache_file(original_path)
+        {:error, "Failed to get image dimensions: #{reason}"}
     end
   end
 
@@ -460,24 +461,23 @@ defmodule ImageCachingServer.ImageCache do
   end
 
     defp save_image_to_cache(image_data, temp_path, hash) do
-    # First save to temporary file
-    with :ok <- File.write(temp_path, image_data),
-         {:ok, format} <- get_image_format(temp_path) do
-
+    with {:ok, format} <- detect_image_format(image_data),
+         :ok <- File.write(temp_path, image_data) do
       final_path = Path.join(@cache_dir, "#{hash}.#{format}")
 
       case File.rename(temp_path, final_path) do
         :ok ->
-          # Track file size in cache
           update_cache_size_tracking(final_path)
           {:ok, final_path}
 
         {:error, reason} ->
+          File.rm(temp_path)
           Logger.error("Failed to rename temporary file: #{inspect(reason)}")
           {:error, "Failed to rename temporary file: #{inspect(reason)}"}
       end
     else
       {:error, reason} ->
+        File.rm(temp_path)
         Logger.error("Failed to save or process image: #{inspect(reason)}")
         {:error, "Failed to save or process image: #{inspect(reason)}"}
     end
@@ -571,40 +571,21 @@ defmodule ImageCachingServer.ImageCache do
     end
   end
 
-  defp get_image_format(path) do
-    case identify_image(path) do
-      {:ok, %{format: format}} ->
-        {:ok, normalize_ext(format)}
+  defp detect_image_format(<<0xFF, 0xD8, _::binary>>), do: {:ok, "jpeg"}
+  defp detect_image_format(<<0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, _::binary>>), do: {:ok, "png"}
+  defp detect_image_format(<<"GIF87a", _::binary>>), do: {:ok, "gif"}
+  defp detect_image_format(<<"GIF89a", _::binary>>), do: {:ok, "gif"}
+  defp detect_image_format(<<"RIFF", _::binary-size(4), "WEBP", _::binary>>), do: {:ok, "webp"}
+  defp detect_image_format(_), do: {:error, "response was not an image"}
 
-      {:error, identify_reason} ->
-        Logger.warning("identify failed for format detection (#{identify_reason}), falling back to file")
-
-        case System.cmd("file", ["--mime-type", "-b", path], stderr_to_stdout: true) do
-          {mime, 0} ->
-            {:ok, mime_to_ext(String.trim(mime))}
-
-          {error, _} ->
-            Logger.error("Failed to determine format using file command: #{error}")
-            {:error, "Could not determine format"}
-        end
-    end
-  rescue
-    e ->
-      Logger.error("Error in get_image_format: #{inspect(e)}")
-      {:error, "Failed to determine image format: #{inspect(e)}"}
-  end
-
-  defp normalize_ext("jpg"), do: "jpeg"
-  defp normalize_ext("jpeg"), do: "jpeg"
-  defp normalize_ext(format) when is_binary(format), do: format
-
-  defp mime_to_ext("image/jpeg"), do: "jpeg"
-  defp mime_to_ext("image/png"), do: "png"
-  defp mime_to_ext("image/gif"), do: "gif"
-  defp mime_to_ext("image/webp"), do: "webp"
-  defp mime_to_ext(mime) do
-    Logger.warning("Unexpected MIME type: #{mime}, defaulting to jpeg")
-    "jpeg"
+  defp evict_invalid_cache_file(path) do
+    file = Path.basename(path)
+    size = ConCache.get(:size_cache, "size_#{file}") || 0
+    File.rm(path)
+    ConCache.delete(:size_cache, "size_#{file}")
+    current_size = ConCache.get(:size_cache, :total_size) || 0
+    ConCache.put(:size_cache, :total_size, max(current_size - size, 0))
+    Logger.info("Removed invalid cache file #{file}")
   end
 
   defp scale_image(input_path, output_path, width) do

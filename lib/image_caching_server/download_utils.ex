@@ -37,6 +37,9 @@ defmodule ImageCachingServer.DownloadUtils do
       {:error, :too_large} ->
         Logger.warning("Download exceeded #{max_download_bytes()} byte limit: #{url}")
         {:error, "Failed to download image: file too large"}
+      {:error, :not_image} ->
+        Logger.warning("URL did not return an image: #{url}")
+        {:error, "Failed to download image: response was not an image"}
       {:error, reason} ->
         Logger.debug("Req download attempt result: #{inspect(reason)}")
         if reason != "Req library not available" do
@@ -54,6 +57,9 @@ defmodule ImageCachingServer.DownloadUtils do
           {:error, :too_large} ->
             Logger.warning("Curl download exceeded #{max_download_bytes()} byte limit: #{url}")
             {:error, "Failed to download image: file too large"}
+          {:error, :not_image} ->
+            Logger.warning("Curl download was not an image: #{url}")
+            {:error, "Failed to download image: response was not an image"}
           error ->
             Logger.warning("Curl download failed: #{inspect(error)}", [])
             error
@@ -101,8 +107,14 @@ defmodule ImageCachingServer.DownloadUtils do
                   {:ok, %{size: size}} when size > 100 ->
                     data = File.read!(output_path)
                     File.rm!(output_path)
-                    Logger.debug("curl download successful: #{byte_size(data)} bytes")
-                    {:ok, data}
+
+                    if image_payload?(data) do
+                      Logger.debug("curl download successful: #{byte_size(data)} bytes")
+                      {:ok, data}
+                    else
+                      Logger.warning("curl download was not an image", [])
+                      {:error, :not_image}
+                    end
 
                   {:ok, %{size: size}} ->
                     File.rm(output_path)
@@ -150,8 +162,12 @@ defmodule ImageCachingServer.DownloadUtils do
         case make_req_request(url) do
           {:ok, %{status: 200, body: :too_large}} ->
             {:error, :too_large}
-          {:ok, %{status: 200, body: body}} when is_binary(body) ->
-            handle_successful_req_response(body)
+          {:ok, %{status: 200, body: body, headers: headers}} when is_binary(body) ->
+            cond do
+              not image_content_type?(headers) -> {:error, :not_image}
+              not image_payload?(body) -> {:error, :not_image}
+              true -> handle_successful_req_response(body)
+            end
           {:ok, %{status: status}} ->
             handle_req_error_status(status)
           {:error, error} ->
@@ -236,4 +252,40 @@ defmodule ImageCachingServer.DownloadUtils do
     Logger.warning("Req HTTP error status: #{status}", [])
     {:error, {:http_error, status, description}}
   end
+
+  defp image_content_type?(headers) do
+    case content_type(headers) do
+      nil -> true
+      ct ->
+        ct = String.downcase(ct)
+
+        String.starts_with?(ct, "image/") or
+          String.starts_with?(ct, "application/octet-stream") or
+          String.starts_with?(ct, "binary/")
+    end
+  end
+
+  defp content_type(headers) when is_map(headers) do
+    headers
+    |> Enum.find_value(fn
+      {key, value} when is_binary(key) ->
+        if String.downcase(key) == "content-type", do: header_value(value)
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp content_type(_), do: nil
+
+  defp header_value(value) when is_binary(value), do: value
+  defp header_value([value | _]) when is_binary(value), do: value
+  defp header_value(_), do: nil
+
+  defp image_payload?(<<0xFF, 0xD8, _::binary>>), do: true
+  defp image_payload?(<<0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, _::binary>>), do: true
+  defp image_payload?(<<"GIF87a", _::binary>>), do: true
+  defp image_payload?(<<"GIF89a", _::binary>>), do: true
+  defp image_payload?(<<"RIFF", _::binary-size(4), "WEBP", _::binary>>), do: true
+  defp image_payload?(_), do: false
 end
