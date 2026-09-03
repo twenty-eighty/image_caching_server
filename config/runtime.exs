@@ -6,6 +6,12 @@ import Config
 # and secrets from environment variables or elsewhere. Do not define
 # any compile-time configuration in here, as it won't be applied.
 
+# mix release does not start Cowboy unless this is set. Render's
+# startCommand uses the release (not `mix phx.server`).
+if System.get_env("PHX_SERVER") do
+  config :image_caching_server, ImageCachingServerWeb.Endpoint, server: true
+end
+
 if config_env() == :prod do
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
@@ -32,7 +38,9 @@ if config_env() == :prod do
       ip: {0, 0, 0, 0, 0, 0, 0, 0},
       port: port
     ],
-    secret_key_base: secret_key_base
+    secret_key_base: secret_key_base,
+    # Always bind HTTP in prod so a missing PHX_SERVER cannot skip the listener.
+    server: true
 
   # ## SSL Support
   #
