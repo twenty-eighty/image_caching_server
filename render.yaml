@@ -63,7 +63,4 @@ services:
         - mix.lock
         - lib/**/*
         - config/**/*
-    scaling:
-      minInstances: 1
-      maxInstances: 1
     healthCheckPath: / 
